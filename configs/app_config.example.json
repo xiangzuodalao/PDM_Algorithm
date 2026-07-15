@@ -1,0 +1,7 @@
+{
+  "upload_url": "https://your-file-host/api/file/Uploader/annexpic",
+  "api_timeout": 10,
+  "max_retries": 3,
+  "log_level": "INFO",
+  "some_other_api_key": "YOUR_API_KEY_HERE"
+}

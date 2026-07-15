@@ -1,0 +1,305 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>卷宗处理系统 - API文档</title>
+    <meta charset="utf-8">
+    <style>
+        /* 内联CSS样式，替代在线CDN */
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+        }
+        .swagger-ui {
+            font-family: sans-serif;
+        }
+        .swagger-ui .topbar {
+            background-color: #89bf04;
+            padding: 8px 0;
+        }
+        .swagger-ui .topbar .download-url-wrapper {
+            display: none;
+        }
+        .swagger-ui .info {
+            margin: 50px 0;
+        }
+        .swagger-ui .info .title {
+            font-size: 36px;
+            color: #3b4151;
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+        .swagger-ui .info .description {
+            font-size: 14px;
+            color: #3b4151;
+            margin-bottom: 20px;
+        }
+        .swagger-ui .scheme-container {
+            background: #fff;
+            box-shadow: 0 1px 2px 0 rgba(0,0,0,.15);
+            padding: 30px 0;
+            margin: 0;
+        }
+        .swagger-ui .opblock {
+            margin-bottom: 10px;
+            border: 1px solid #3b4151;
+            border-radius: 4px;
+        }
+        .swagger-ui .opblock .opblock-summary-method {
+            font-size: 14px;
+            font-weight: 700;
+            min-width: 80px;
+            padding: 6px 15px;
+            text-align: center;
+            border-radius: 3px;
+            background: #61affe;
+            color: #fff;
+        }
+        .swagger-ui .opblock.opblock-post .opblock-summary-method {
+            background: #49cc90;
+        }
+        .swagger-ui .opblock.opblock-delete .opblock-summary-method {
+            background: #f93e3e;
+        }
+        .swagger-ui .opblock-summary-path {
+            font-size: 16px;
+            color: #3b4151;
+            font-weight: 600;
+            padding: 10px;
+        }
+        .swagger-ui .opblock-description-wrapper {
+            padding: 15px 20px;
+            font-size: 14px;
+            color: #3b4151;
+        }
+        .swagger-ui .response-content-type {
+            font-size: 12px;
+            color: #3b4151;
+        }
+        .api-info {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .endpoint {
+            background: #fff;
+            border: 1px solid #d4dee7;
+            border-radius: 4px;
+            margin: 10px 0;
+            overflow: hidden;
+        }
+        .endpoint-header {
+            background: #f7f9fa;
+            padding: 15px 20px;
+            border-bottom: 1px solid #d4dee7;
+            display: flex;
+            align-items: center;
+        }
+        .method {
+            font-weight: 700;
+            font-size: 12px;
+            padding: 5px 10px;
+            border-radius: 3px;
+            color: #fff;
+            margin-right: 15px;
+            min-width: 60px;
+            text-align: center;
+        }
+        .method.get { background: #61affe; }
+        .method.post { background: #49cc90; }
+        .method.delete { background: #f93e3e; }
+        .method.put { background: #fca130; }
+        .path {
+            font-size: 16px;
+            font-weight: 600;
+            color: #3b4151;
+        }
+        .endpoint-description {
+            padding: 15px 20px;
+            color: #3b4151;
+            font-size: 14px;
+        }
+        .header-info {
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 40px 20px;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .header-info h1 {
+            margin: 0;
+            font-size: 2.5em;
+            font-weight: 300;
+        }
+        .header-info p {
+            margin: 10px 0 0 0;
+            font-size: 1.1em;
+            opacity: 0.9;
+        }
+        .quick-links {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 30px;
+        }
+        .quick-links h3 {
+            margin-top: 0;
+            color: #495057;
+        }
+        .quick-links a {
+            display: inline-block;
+            margin: 5px 10px 5px 0;
+            padding: 8px 16px;
+            background: #007bff;
+            color: white;
+            text-decoration: none;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        .quick-links a:hover {
+            background: #0056b3;
+        }
+    </style>
+</head>
+<body>
+    <div class="header-info">
+        <h1>🏛️ 卷宗处理系统</h1>
+        <p>集成OCR、Excel处理和Neo4j知识图谱构建的API系统</p>
+    </div>
+    
+    <div class="api-info">
+        <div class="quick-links">
+            <h3>🔗 快速链接</h3>
+            <a href="/">首页</a>
+            <a href="/health">健康检查</a>
+            <a href="/system/info">系统信息</a>
+            <a href="/openapi.json">OpenAPI规范</a>
+        </div>
+        
+        <h2>📚 API端点</h2>
+        
+        <div class="endpoint">
+            <div class="endpoint-header">
+                <span class="method get">GET</span>
+                <span class="path">/</span>
+            </div>
+            <div class="endpoint-description">
+                <strong>系统首页</strong><br>
+                获取系统基本信息和状态
+            </div>
+        </div>
+        
+        <div class="endpoint">
+            <div class="endpoint-header">
+                <span class="method get">GET</span>
+                <span class="path">/health</span>
+            </div>
+            <div class="endpoint-description">
+                <strong>健康检查</strong><br>
+                检查系统运行状态和各服务健康状况
+            </div>
+        </div>
+        
+        <div class="endpoint">
+            <div class="endpoint-header">
+                <span class="method get">GET</span>
+                <span class="path">/system/info</span>
+            </div>
+            <div class="endpoint-description">
+                <strong>详细系统信息</strong><br>
+                获取系统配置、版本、运行时间等详细信息
+            </div>
+        </div>
+        
+        <div class="endpoint">
+            <div class="endpoint-header">
+                <span class="method post">POST</span>
+                <span class="path">/api/ocr/upload</span>
+            </div>
+            <div class="endpoint-description">
+                <strong>OCR文件上传</strong><br>
+                上传PDF文件进行OCR处理和知识图谱构建<br>
+                <em>参数: files (文件列表), case_name (案件名称)</em>
+            </div>
+        </div>
+        
+        <div class="endpoint">
+            <div class="endpoint-header">
+                <span class="method get">GET</span>
+                <span class="path">/api/ocr/tasks</span>
+            </div>
+            <div class="endpoint-description">
+                <strong>获取OCR任务列表</strong><br>
+                查看所有OCR处理任务的状态
+            </div>
+        </div>
+        
+        <div class="endpoint">
+            <div class="endpoint-header">
+                <span class="method get">GET</span>
+                <span class="path">/api/ocr/task/{task_id}</span>
+            </div>
+            <div class="endpoint-description">
+                <strong>获取任务详情</strong><br>
+                根据任务ID获取具体任务的处理进度和结果
+            </div>
+        </div>
+        
+        <div class="endpoint">
+            <div class="endpoint-header">
+                <span class="method post">POST</span>
+                <span class="path">/api/excel/analyze</span>
+            </div>
+            <div class="endpoint-description">
+                <strong>Excel数据分析</strong><br>
+                上传Excel文件进行程序性违法查询分析<br>
+                <em>参数: file (Excel文件), case_name (案件名称)</em>
+            </div>
+        </div>
+        
+        <div class="endpoint">
+            <div class="endpoint-header">
+                <span class="method post">POST</span>
+                <span class="path">/api/neo4j/query</span>
+            </div>
+            <div class="endpoint-description">
+                <strong>Neo4j图数据库查询</strong><br>
+                执行Cypher查询语句，检索知识图谱数据<br>
+                <em>参数: query (Cypher查询语句)</em>
+            </div>
+        </div>
+        
+        <div class="endpoint">
+            <div class="endpoint-header">
+                <span class="method get">GET</span>
+                <span class="path">/api/neo4j/stats</span>
+            </div>
+            <div class="endpoint-description">
+                <strong>数据库统计信息</strong><br>
+                获取Neo4j数据库节点和关系的统计数据
+            </div>
+        </div>
+        
+        <h2>💡 使用示例</h2>
+        <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; font-family: monospace; font-size: 14px;">
+# Python使用示例<br>
+import requests<br>
+<br>
+# 健康检查<br>
+response = requests.get("http://localhost:8000/health")<br>
+print(response.json())<br>
+<br>
+# 上传文件进行OCR处理<br>
+files = {'files': open('document.pdf', 'rb')}<br>
+data = {'case_name': '测试案件'}<br>
+response = requests.post("http://localhost:8000/api/ocr/upload", files=files, data=data)<br>
+print(response.json())
+        </div>
+        
+        <div style="margin-top: 40px; padding-top: 20px; border-top: 1px solid #dee2e6; color: #6c757d; text-align: center;">
+            <p><strong>卷宗处理系统</strong> v1.0.0 | 完全离线API文档</p>
+        </div>
+    </div>
+</body>
+</html>

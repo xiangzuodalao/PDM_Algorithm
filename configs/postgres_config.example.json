@@ -1,0 +1,5 @@
+{
+  "conn_str": "host=host.docker.internal port=5432 dbname=YOUR_DB user=YOUR_USER password=YOUR_PASSWORD",
+  "sql_query": "SELECT id, equipment_code, meas_code, value, unit, collect_time FROM equipment_measurement WHERE equipment_code = %s AND meas_code = %s AND collect_time >= %s AND collect_time <= %s ORDER BY collect_time ASC",
+  "label": "value"
+}

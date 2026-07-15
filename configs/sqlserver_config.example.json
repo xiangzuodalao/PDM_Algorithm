@@ -1,0 +1,16 @@
+{
+  "conn_str": "Driver={ODBC Driver 18 for SQL Server};Server=sqlserver,1433;Database=YOUR_DB;Uid=YOUR_USER;Pwd=YOUR_PASSWORD;TrustServerCertificate=yes;",
+  "table": "mom_bas_ai_model_train_record",
+  "id_column": "ModelInfold",
+  "status_column": "TrainStatus",
+  "desc_column": "ResDescription",
+  "endtime_column": "TrainEndTime",
+  "activate_column": "IsActive",
+  "activate_value": 1,
+  "attachments_column": "ResAttachments",
+  "attachments_max_length": 2048,
+  "status_running": 1,
+  "status_success": 3,
+  "status_failed": 2,
+  "description_max_length": 50
+}

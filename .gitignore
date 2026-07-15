@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local configs / secrets (keep *.example.json tracked as sanitized templates)
+configs/postgres_config.json
+configs/sqlserver_config.json
+configs/app_config.json
+
+# Artifacts / datasets (keep local, do not commit)
+artifacts/
+data/
+
+# IDE
+.vscode/

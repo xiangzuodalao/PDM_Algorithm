@@ -1,0 +1,14 @@
+.git
+.vscode
+.venv
+venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.egg-info
+
+artifacts
+data
+configs/postgres_config.json
+
