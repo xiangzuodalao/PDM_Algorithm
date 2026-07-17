@@ -4,15 +4,19 @@ import os
 from typing import Tuple
 
 import numpy as np
-import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
 from valeo_pdm.db.data_reader import load_postgres_timeseries
-from valeo_pdm.transformer.data import load_series, make_windows, normalize_train_mean_std, split_train_val_test
-from valeo_pdm.transformer.train_informer import normalize_columns, parse_time, resample_group
+from valeo_pdm.transformer.data import (
+    clean_and_resample_timeseries,
+    load_series,
+    make_windows,
+    normalize_train_mean_std,
+    split_train_val_test,
+)
 
 
 def set_seed(seed: int = 42):
@@ -143,11 +147,13 @@ def do_training(
         values = load_series(data)
     else:
         df = load_postgres_timeseries(config, equipment_code, meas_code, days_back=days_back)
-        df = normalize_columns(df)
-        df = parse_time(df)
-        gdf = df[df["meas_code"] == meas_code] if "meas_code" in df.columns else df
-        series_df = resample_group(gdf, freq=freq)
-        values = pd.to_numeric(series_df["value"], errors="coerce").dropna().to_numpy(dtype=np.float32)
+        series_df, _quality = clean_and_resample_timeseries(
+            df,
+            freq,
+            equipment_code=equipment_code,
+            meas_code=meas_code,
+        )
+        values = series_df["value"].to_numpy(dtype=np.float32)
 
     train_loader, val_loader, test_loader, mean, std = build_dataloaders(
         values, seq_len, label_len, pred_len, batch_size, stride=stride
