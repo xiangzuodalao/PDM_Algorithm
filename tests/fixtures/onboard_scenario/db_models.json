@@ -1,0 +1,18 @@
+{
+  "models": {
+    "DB-EXIST": {
+      "MEAS-EXIST": {
+        "model_type": "informer",
+        "freq": "30min",
+        "days_back": 14,
+        "source": "db",
+        "db_only": true,
+        "train_params": {
+          "seq_len": 4,
+          "label_len": 2,
+          "pred_len": 2
+        }
+      }
+    }
+  }
+}

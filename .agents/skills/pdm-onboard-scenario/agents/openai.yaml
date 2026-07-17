@@ -1,0 +1,4 @@
+interface:
+  display_name: "PDM 场景接入"
+  short_description: "安全预览、校验并新增 PDM 设备与测点训练场景配置，避免覆盖冲突"
+  default_prompt: "使用 $pdm-onboard-scenario 预览并安全新增一个经过验证的 PDM 设备与测点场景。"

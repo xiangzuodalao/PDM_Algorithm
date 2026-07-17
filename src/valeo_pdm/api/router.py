@@ -2,21 +2,34 @@ from __future__ import annotations
 
 import os
 import asyncio
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictInt
 
-from valeo_pdm.paths import configs_dir
+from valeo_pdm.paths import configs_dir, resolve_repo_path
 from valeo_pdm.training.from_config import save_train_params
 from valeo_pdm.training.registry import get_trainer
 from valeo_pdm.training.from_config import _format_metrics_desc  # reuse short description formatter
 from valeo_pdm.db.train_status import SqlServerTrainStatusUpdater, upload_forecast_image
-from valeo_pdm.transformer.artifacts import checkpoint_filename, resolve_checkpoint_path, training_output_dir
+from valeo_pdm.transformer.artifacts import (
+    checkpoint_filename,
+    resolve_checkpoint_path,
+    training_output_dir,
+)
 from valeo_pdm.transformer.config import get_model_config, list_all_models
-from valeo_pdm.transformer.predict import predict_autoformer_api, predict_informer_api, predict_testmodel_api
-import math
+from valeo_pdm.transformer.data import (
+    clean_and_resample_timeseries,
+    load_timeseries_file,
+    minimum_rows_for_usable_window_splits,
+    validate_window_params,
+    window_split_counts,
+)
+from valeo_pdm.transformer.predict import (
+    predict_autoformer_api,
+    predict_informer_api,
+    predict_testmodel_api,
+)
 from valeo_pdm.db.data_reader import load_sqlserver_timeseries, load_postgres_timeseries
 
 MODEL_PREDICT_FUNCS = {
@@ -24,6 +37,7 @@ MODEL_PREDICT_FUNCS = {
     "testmodel": predict_testmodel_api,
     "autoformer": predict_autoformer_api,
 }
+API_TRAIN_MODEL_TYPES = frozenset({"informer", "autoformer"})
 
 
 class DynamicParams(BaseModel):
@@ -101,33 +115,37 @@ class TrainResponse(BaseModel):
     run_dir: Optional[str] = None
     train_params: Dict[str, Any] = Field(default_factory=dict)
 
+
 class DataCheckRequest(BaseModel):
     EquipmentCode: str
     MeasCode: str
-    SeqLen: int = 1344      # 模型输入序列长度
-    PredLen: int = 672     # 模型预测长度
-    DaysBack: int = 365    # 拉取过去多少天的数据
-    Source: str = "sqlserver" # 数据源类型
+    SeqLen: StrictInt = 1344
+    LabelLen: StrictInt = 336
+    PredLen: StrictInt = 672
+    Stride: StrictInt = 1
+    Freq: str = "15min"
+    DaysBack: int = 365
+    Source: str = "sqlserver"
+    DataPath: Optional[str] = None
 
 
 router = APIRouter(prefix="/measPredict", tags=["设备参数预测"])
 
 
 def _postgres_config_path() -> str:
-    return os.getenv("VALEO_PDM_POSTGRES_CONFIG") or str((configs_dir() / "postgres_config.json").resolve())
+    return os.getenv("VALEO_PDM_POSTGRES_CONFIG") or str(
+        (configs_dir() / "postgres_config.json").resolve()
+    )
 
 
 def _sqlserver_config_path() -> str:
-    return os.getenv("VALEO_PDM_SQLSERVER_CONFIG") or str((configs_dir() / "sqlserver_config.json").resolve())
+    return os.getenv("VALEO_PDM_SQLSERVER_CONFIG") or str(
+        (configs_dir() / "sqlserver_config.json").resolve()
+    )
 
 
 def _resolve_csv_path(path_str: str) -> str:
-    p = Path(path_str)
-    if p.is_absolute() and p.exists():
-        return str(p)
-    if p.exists():
-        return str(p.resolve())
-    return str(p)
+    return str(resolve_repo_path(path_str))
 
 
 PARAM_CASTERS: Dict[str, Any] = {
@@ -174,7 +192,7 @@ INFORMER_DEFAULTS: Dict[str, Any] = {
     "lr_patience": 5,
     "weight_decay": 0.0,
     "grad_clip": 0.5,
-    "stride": 12,
+    "stride": 1,
 }
 
 AUTOFORMER_DEFAULTS: Dict[str, Any] = {
@@ -196,6 +214,7 @@ AUTOFORMER_DEFAULTS: Dict[str, Any] = {
     "lr_patience": 4,
     "weight_decay": 1e-4,
     "grad_clip": 0.5,
+    "stride": 1,
 }
 
 
@@ -218,6 +237,10 @@ def _convert_param(name: str, raw: Any) -> Any:
     if not caster:
         raise HTTPException(status_code=400, detail=f"不支持的训练参数: {name}")
     try:
+        if name in {"seq_len", "label_len", "pred_len", "stride"} and (
+            isinstance(raw, bool) or not isinstance(raw, int)
+        ):
+            raise ValueError
         if caster is bool:
             return _parse_bool(raw)
         return caster(raw)
@@ -273,30 +296,41 @@ def train_model(request: TrainRequest):
             # 如果请求中没有传递 DataSource，则回退使用配置中的 source
             if source == "sqlserver":
                 cfg = _sqlserver_config_path()
-                print(f"命中数据配置: {request.DataSource} == {source} == {cfg}")
+                print(f"命中数据源: {request.DataSource} == {source}")
             elif source in ["db", "postgres"]:
                 cfg = _postgres_config_path()
             else:
                 cfg = None  # CSV 不需要数据库配置
 
-        print(f"数据配置: {request.DataSource} == {source} == {cfg}")
+        print(f"数据源: {request.DataSource} == {source}")
         freq = config.get("freq", "15min")
         days_back = int(config.get("days_back", 365))
         data_path = config.get("data_path", "")
 
         config_train_params = config.get("train_params", {}) or {}
         override_params = _build_train_params(request.ParamArr)
+        if model_type not in API_TRAIN_MODEL_TYPES:
+            raise HTTPException(status_code=400, detail=f"不支持的模型类型: {model_type}")
         if model_type == "informer":
             merged_params = {**INFORMER_DEFAULTS, **config_train_params, **override_params}
-        elif model_type == "autoformer":
-            merged_params = {**AUTOFORMER_DEFAULTS, **config_train_params, **override_params}
         else:
-            raise HTTPException(status_code=400, detail=f"不支持的模型类型: {model_type}")
+            merged_params = {**AUTOFORMER_DEFAULTS, **config_train_params, **override_params}
+        try:
+            validate_window_params(
+                merged_params["seq_len"],
+                merged_params["label_len"],
+                merged_params["pred_len"],
+                merged_params.get("stride", 1),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         if not request.ModelInfoID:
             raise HTTPException(status_code=400, detail="ModelInfoID 不能为空")
 
-        base_dir = training_output_dir(request.EquipmentCode, request.MeasCode, model_type).resolve()
+        base_dir = training_output_dir(
+            request.EquipmentCode, request.MeasCode, model_type
+        ).resolve()
         run_dir = (base_dir / request.ModelInfoID).resolve()
         save_dir = str(run_dir)
         trainer = get_trainer(model_type)
@@ -320,9 +354,13 @@ def train_model(request: TrainRequest):
         if model_type in {"informer", "testmodel"}:
             distil_raw = merged_params.get("distil", True)
             try:
-                distil_bool = distil_raw if isinstance(distil_raw, bool) else _parse_bool(distil_raw)
+                distil_bool = (
+                    distil_raw if isinstance(distil_raw, bool) else _parse_bool(distil_raw)
+                )
             except ValueError:
-                raise HTTPException(status_code=400, detail=f"训练参数[distil]的值无效: {distil_raw}")
+                raise HTTPException(
+                    status_code=400, detail=f"训练参数[distil]的值无效: {distil_raw}"
+                )
 
             result = trainer(
                 **common_kwargs,
@@ -376,6 +414,7 @@ def train_model(request: TrainRequest):
                 lr_patience=int(merged_params["lr_patience"]),
                 weight_decay=float(merged_params["weight_decay"]),
                 grad_clip=float(merged_params["grad_clip"]),
+                stride=int(merged_params["stride"]),
             )
 
         save_train_params(
@@ -394,7 +433,9 @@ def train_model(request: TrainRequest):
 
         if status_updater:
             try:
-                desc = _format_metrics_desc(result.get("best_val", "N/A"), result.get("test_loss", "N/A"))
+                desc = _format_metrics_desc(
+                    result.get("best_val", "N/A"), result.get("test_loss", "N/A")
+                )
 
                 # 获取本地生成的图片路径
                 local_attachment_path = (result.get("plots") or {}).get("forecast")
@@ -442,7 +483,6 @@ async def predict_transformer(request: PredictionRequest):
     if request.ModelType is not None and not request.ModelType.strip():
         request.ModelType = None
     try:
-        cfg = _postgres_config_path()
         config = get_model_config(request.EquipmentCode, request.MeasCode)
         if not config:
             raise HTTPException(
@@ -454,13 +494,30 @@ async def predict_transformer(request: PredictionRequest):
         model_type = str(req_model_type).lower()
         freq = config.get("freq", "15min")
         days_back = int(config.get("days_back", 365))
+        source = str(config.get("source", "db")).strip().lower()
+        data_path = str(config.get("data_path", ""))
+
+        if source == "sqlserver":
+            cfg = _sqlserver_config_path()
+        elif source in {"db", "postgres"}:
+            cfg = _postgres_config_path()
+        elif source == "csv":
+            cfg = ""
+            data_path = _resolve_csv_path(data_path)
+        else:
+            raise HTTPException(status_code=400, detail=f"不支持的数据源: {source}")
 
         predict_func = MODEL_PREDICT_FUNCS.get(model_type)
         if not predict_func:
             raise HTTPException(status_code=400, detail=f"不支持的模型类型: {model_type}")
+        if model_type == "autoformer" and source != "csv":
+            raise HTTPException(status_code=400, detail="Autoformer 仅支持 CSV 数据源")
 
         if request.ModelInfoID:
-            run_dir = training_output_dir(request.EquipmentCode, request.MeasCode, model_type) / request.ModelInfoID
+            run_dir = (
+                training_output_dir(request.EquipmentCode, request.MeasCode, model_type)
+                / request.ModelInfoID
+            )
             ckpt_path = run_dir / checkpoint_filename(model_type)
             if not ckpt_path.exists():
                 raise HTTPException(
@@ -482,6 +539,8 @@ async def predict_transformer(request: PredictionRequest):
             days_back,
             str(ckpt_path),
             cfg,
+            source=source,
+            data_path=data_path,
         )
         return APIResponse(**resp)
     except HTTPException:
@@ -510,58 +569,121 @@ def list_models():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @router.post("/checkData", summary="校验训练数据量是否充足")
 def check_training_data(request: DataCheckRequest):
-    # 1. 获取对应的数据库配置文件路径
-    source = request.Source.lower()
-    if source == "sqlserver":
-        db_config_path = os.getenv("VALEO_PDM_SQLSERVER_CONFIG") or str(
-            (configs_dir() / "sqlserver_config.json").resolve())
-    elif source in ["db", "postgres"]:
-        db_config_path = _postgres_config_path()
+    try:
+        validate_window_params(
+            request.SeqLen,
+            request.LabelLen,
+            request.PredLen,
+            request.Stride,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    source = request.Source.strip().lower()
+    empty_quality = {
+        "input_rows": 0,
+        "filtered_rows": 0,
+        "dropped_invalid_time_rows": 0,
+        "dropped_invalid_value_rows": 0,
+        "valid_rows_before_resample": 0,
+        "aggregated_rows": 0,
+        "rows_after_resample": 0,
+    }
+
+    if source == "csv":
+        if not request.DataPath:
+            raise HTTPException(status_code=400, detail="CSV 数据校验缺少 DataPath")
+        try:
+            cleaned, quality = load_timeseries_file(
+                _resolve_csv_path(request.DataPath),
+                request.Freq,
+                equipment_code=request.EquipmentCode,
+                meas_code=request.MeasCode,
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f"CSV 数据无效: {exc}") from exc
+    elif source in {"db", "postgres", "sqlserver"}:
+        db_config_path = (
+            _sqlserver_config_path() if source == "sqlserver" else _postgres_config_path()
+        )
+        try:
+            if source == "sqlserver":
+                raw = load_sqlserver_timeseries(
+                    db_config_path,
+                    request.EquipmentCode,
+                    request.MeasCode,
+                    request.DaysBack,
+                )
+            else:
+                raw = load_postgres_timeseries(
+                    db_config_path,
+                    request.EquipmentCode,
+                    request.MeasCode,
+                    request.DaysBack,
+                )
+        except ValueError:
+            raw = None
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail="数据库读取失败") from exc
+
+        if raw is None:
+            cleaned = None
+            quality = empty_quality
+        else:
+            try:
+                cleaned, quality = clean_and_resample_timeseries(
+                    raw,
+                    request.Freq,
+                    equipment_code=request.EquipmentCode,
+                    meas_code=request.MeasCode,
+                )
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=400, detail=f"时序数据无效: {exc}") from exc
     else:
         raise HTTPException(status_code=400, detail="不支持的数据源类型")
 
-    try:
-        # 2. 真实拉取数据库，获取总数据量
-        if source == "sqlserver":
-            df = load_sqlserver_timeseries(db_config_path, request.EquipmentCode, request.MeasCode, request.DaysBack)
-        else:
-            df = load_postgres_timeseries(db_config_path, request.EquipmentCode, request.MeasCode, request.DaysBack)
+    rows_after_resample = 0 if cleaned is None else len(cleaned)
+    counts = window_split_counts(
+        rows_after_resample,
+        request.SeqLen,
+        request.LabelLen,
+        request.PredLen,
+        request.Stride,
+    )
+    required_rows = minimum_rows_for_usable_window_splits(
+        request.SeqLen,
+        request.LabelLen,
+        request.PredLen,
+        request.Stride,
+    )
+    missing_rows = max(0, required_rows - rows_after_resample)
+    usable = (
+        min(
+            counts["train_windows"],
+            counts["val_windows"],
+            counts["test_windows"],
+        )
+        >= 1
+    )
 
-        total_data_volume = len(df)
-
-    except ValueError as e:
-        # 捕获我们在 data_reader 中写的 df.empty 报错
-        total_data_volume = 0
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"数据库读取失败: {str(e)}")
-
-    # 3. 算法核心公式计算
-    seq_len = request.SeqLen
-    pred_len = request.PredLen
-
-    # 理论最低需求行数 (满足 Informer 7:1:2 切分并且能切出至少 1 个样本)
-    req_train = (seq_len + pred_len) / 0.7
-    req_val = pred_len / 0.1
-    required_sample_count = math.ceil(max(req_train, req_val))
-
-    # 总体有效样本数量 (滑动窗口能切出的总样本数)
-    effective_sample_count = max(0, total_data_volume - seq_len - pred_len + 1)
-
-    # 欠缺样本数量
-    missing_sample_count = max(0, required_sample_count - total_data_volume)
-
-    # 4. 组装返回结果
     return {
         "code": 200,
-        "msg": "校验成功" if missing_sample_count == 0 else "数据量不足以支撑训练",
+        "msg": "校验成功" if usable else "数据量不足以支撑训练",
         "data": {
-            "TotalDataVolume": total_data_volume,  # 数据总量 (总行数)
-            "EffectiveSampleCount": effective_sample_count,  # 有效样本数量 (整段数据能切出的完整样本数)
-            "RequiredSampleCount": required_sample_count,  # 需要样本数量 (理论最低安全线)
-            "MissingSampleCount": missing_sample_count  # 欠缺样本数量
-        }
+            "RawDataVolume": quality["input_rows"],
+            "TotalDataVolume": rows_after_resample,
+            "EffectiveSampleCount": counts["windows"],
+            "RequiredSampleCount": required_rows,
+            "MissingSampleCount": missing_rows,
+            "TrainWindowCount": counts["train_windows"],
+            "ValidationWindowCount": counts["val_windows"],
+            "TestWindowCount": counts["test_windows"],
+            "DataQuality": quality,
+        },
     }
+
 
 informer_router = router

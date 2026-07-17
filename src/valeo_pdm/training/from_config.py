@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import argparse
 import os
-from pathlib import Path
+from typing import Any
 
 import yaml
 import math
-from valeo_pdm.paths import configs_dir
+from valeo_pdm.paths import configs_dir, resolve_repo_path
 from valeo_pdm.training.registry import get_trainer
 from valeo_pdm.transformer.artifacts import training_output_dir
 from valeo_pdm.transformer.config import get_model_config, list_all_models
@@ -14,20 +14,19 @@ from valeo_pdm.db.train_status import SqlServerTrainStatusUpdater, upload_foreca
 
 
 def _postgres_config_path() -> str:
-    return os.getenv("VALEO_PDM_POSTGRES_CONFIG") or str((configs_dir() / "postgres_config.json").resolve())
+    return os.getenv("VALEO_PDM_POSTGRES_CONFIG") or str(
+        (configs_dir() / "postgres_config.json").resolve()
+    )
 
 
 def _sqlserver_config_path() -> str:
-    return os.getenv("VALEO_PDM_SQLSERVER_CONFIG") or str((configs_dir() / "sqlserver_config.json").resolve())
+    return os.getenv("VALEO_PDM_SQLSERVER_CONFIG") or str(
+        (configs_dir() / "sqlserver_config.json").resolve()
+    )
 
 
 def _resolve_csv_path(path_str: str) -> str:
-    p = Path(path_str)
-    if p.is_absolute() and p.exists():
-        return str(p)
-    if p.exists():
-        return str(p.resolve())
-    return str(p)
+    return str(resolve_repo_path(path_str))
 
 
 def save_train_params(
@@ -107,7 +106,7 @@ def _format_metrics_desc(best_val: Any, test_loss: Any, std: float = 1.0) -> str
         # 2. 计算物理误差范围
         physical_err = math.sqrt(test_mse) * std
 
-        print(f"Training OK val={best_val} test={test_loss}")
+        print(f"Training OK val={val_mse} test={test_mse}")
         return f"训练成功 | 趋势准确率: {acc:.1f}% | 平均波动误差: ±{physical_err:.2f}"
     except Exception:
         return f"Training OK val={best_val} test={test_loss}"
@@ -139,9 +138,13 @@ def train_from_config(
         db_config_path = _postgres_config_path()
     else:
         db_config_path = None  # CSV 不需要数据库配置
-    print(f"数据库路径: {db_config_path}")
+    print(f"数据库配置: {'已选择' if db_config_path else '不适用'}")
     save_dir = str(training_output_dir(equipment_code, meas_code, model_type).resolve())
-    status_updater = _maybe_build_status_updater(sqlserver_config or _sqlserver_config_path()) if model_info_id else None
+    status_updater = (
+        _maybe_build_status_updater(sqlserver_config or _sqlserver_config_path())
+        if model_info_id
+        else None
+    )
 
     print("=" * 60)
     print(f"开始训练: {equipment_code} - {meas_code}")
@@ -190,10 +193,18 @@ def train_from_config(
                 lr_patience=train_params.get("lr_patience", 5),
                 weight_decay=train_params.get("weight_decay", 0.0),
                 grad_clip=train_params.get("grad_clip", 0.5),
-                stride=train_params.get("stride", 12),
+                stride=train_params.get("stride", 1),
             )
             save_train_params(
-                save_dir, equipment_code, meas_code, model_type, source, freq, days_back, data_path, train_params
+                save_dir,
+                equipment_code,
+                meas_code,
+                model_type,
+                source,
+                freq,
+                days_back,
+                data_path,
+                train_params,
             )
             print(f"训练完成! 最佳模型保存在: {result['best_path']}")
             # if model_info_id:
@@ -201,14 +212,18 @@ def train_from_config(
             #     attachments = (result.get("plots") or {}).get("forecast")
             #     _safe_mark(status_updater, "success", model_info_id, desc, attachments=attachments)
             if model_info_id:
-                desc = _format_metrics_desc(result.get("best_val", "N/A"), result.get("test_loss", "N/A"))
+                desc = _format_metrics_desc(
+                    result.get("best_val", "N/A"), result.get("test_loss", "N/A")
+                )
                 local_attachment_path = (result.get("plots") or {}).get("forecast")
 
                 db_attachments = None
                 if local_attachment_path:
                     db_attachments = upload_forecast_image(local_attachment_path)
 
-                _safe_mark(status_updater, "success", model_info_id, desc, attachments=db_attachments)
+                _safe_mark(
+                    status_updater, "success", model_info_id, desc, attachments=db_attachments
+                )
             return result
         except Exception as e:
             if model_info_id:
@@ -241,10 +256,18 @@ def train_from_config(
                 lr_patience=train_params.get("lr_patience", 5),
                 weight_decay=train_params.get("weight_decay", 0.0),
                 grad_clip=train_params.get("grad_clip", 0.5),
-                stride=train_params.get("stride", 12),
+                stride=train_params.get("stride", 1),
             )
             save_train_params(
-                save_dir, equipment_code, meas_code, model_type, source, freq, days_back, data_path, train_params
+                save_dir,
+                equipment_code,
+                meas_code,
+                model_type,
+                source,
+                freq,
+                days_back,
+                data_path,
+                train_params,
             )
             print(f"训练完成! 最佳模型保存在: {result['best_path']}")
             # if model_info_id:
@@ -252,14 +275,18 @@ def train_from_config(
             #     attachments = (result.get("plots") or {}).get("forecast")
             #     _safe_mark(status_updater, "success", model_info_id, desc, attachments=attachments)
             if model_info_id:
-                desc = _format_metrics_desc(result.get("best_val", "N/A"), result.get("test_loss", "N/A"))
+                desc = _format_metrics_desc(
+                    result.get("best_val", "N/A"), result.get("test_loss", "N/A")
+                )
                 local_attachment_path = (result.get("plots") or {}).get("forecast")
 
                 db_attachments = None
                 if local_attachment_path:
                     db_attachments = upload_forecast_image(local_attachment_path)
 
-                _safe_mark(status_updater, "success", model_info_id, desc, attachments=db_attachments)
+                _safe_mark(
+                    status_updater, "success", model_info_id, desc, attachments=db_attachments
+                )
             return result
         except Exception as e:
             if model_info_id:
@@ -294,9 +321,18 @@ def train_from_config(
                 lr_patience=train_params.get("lr_patience", 4),
                 weight_decay=train_params.get("weight_decay", 1e-4),
                 grad_clip=train_params.get("grad_clip", 0.5),
+                stride=train_params.get("stride", 1),
             )
             save_train_params(
-                save_dir, equipment_code, meas_code, model_type, source, freq, days_back, data_path, train_params
+                save_dir,
+                equipment_code,
+                meas_code,
+                model_type,
+                source,
+                freq,
+                days_back,
+                data_path,
+                train_params,
             )
             print(f"训练完成! 最佳模型保存在: {result['best_path']}")
             # if model_info_id:
@@ -304,22 +340,25 @@ def train_from_config(
             #     attachments = (result.get("plots") or {}).get("forecast")
             #     _safe_mark(status_updater, "success", model_info_id, desc, attachments=attachments)
             if model_info_id:
-                desc = _format_metrics_desc(result.get("best_val", "N/A"), result.get("test_loss", "N/A"))
+                desc = _format_metrics_desc(
+                    result.get("best_val", "N/A"), result.get("test_loss", "N/A")
+                )
                 local_attachment_path = (result.get("plots") or {}).get("forecast")
 
                 db_attachments = None
                 if local_attachment_path:
                     db_attachments = upload_forecast_image(local_attachment_path)
 
-                _safe_mark(status_updater, "success", model_info_id, desc, attachments=db_attachments)
+                _safe_mark(
+                    status_updater, "success", model_info_id, desc, attachments=db_attachments
+                )
             return result
         except Exception as e:
             if model_info_id:
                 _safe_mark(status_updater, "failed", model_info_id, f"Training failed: {e}")
             raise
 
-
-    if mt == "xlstm":#新增模型
+    if mt == "xlstm":  # 新增模型
         # if source != "csv":
         #     raise ValueError("Autoformer 目前仅支持 CSV 数据源")
         # _safe_mark(status_updater, "running", model_info_id, "Training") if model_info_id else None
@@ -346,11 +385,10 @@ def train_from_config(
                 lr_patience=train_params.get("lr_patience", 4),
                 weight_decay=train_params.get("weight_decay", 1e-4),
                 grad_clip=train_params.get("grad_clip", 0.5),
-
                 label_len=train_params.get("label_len", 192),
                 attn_type=train_params.get("attn_type", "prob"),
                 distil_flag="true" if train_params.get("distil", True) else "false",
-                #新加参数
+                # 新加参数
                 # qk_dim_factor=train_params.get("qk_dim_factor", 0.5),
                 # v_dim_factor=train_params.get("v_dim_factor", 1.0),
                 # gate_soft_cap=train_params.get("gate_soft_cap", 15.0),
@@ -361,7 +399,15 @@ def train_from_config(
                 # use_bias=False,
             )
             save_train_params(
-                save_dir, equipment_code, meas_code, model_type, source, freq, days_back, data_path, train_params
+                save_dir,
+                equipment_code,
+                meas_code,
+                model_type,
+                source,
+                freq,
+                days_back,
+                data_path,
+                train_params,
             )
             print(f"训练完成! 最佳模型保存在: {result['best_path']}")
             # if model_info_id:
@@ -369,22 +415,23 @@ def train_from_config(
             #     attachments = (result.get("plots") or {}).get("forecast")
             #     _safe_mark(status_updater, "success", model_info_id, desc, attachments=attachments)
             if model_info_id:
-                desc = _format_metrics_desc(result.get("best_val", "N/A"), result.get("test_loss", "N/A"))
+                desc = _format_metrics_desc(
+                    result.get("best_val", "N/A"), result.get("test_loss", "N/A")
+                )
                 local_attachment_path = (result.get("plots") or {}).get("forecast")
 
                 db_attachments = None
                 if local_attachment_path:
                     db_attachments = upload_forecast_image(local_attachment_path)
 
-                _safe_mark(status_updater, "success", model_info_id, desc, attachments=db_attachments)
+                _safe_mark(
+                    status_updater, "success", model_info_id, desc, attachments=db_attachments
+                )
             return result
         except Exception as e:
             if model_info_id:
                 _safe_mark(status_updater, "failed", model_info_id, f"Training failed: {e}")
             raise
-
-
-
 
     raise ValueError(f"不支持的模型类型: {model_type}")
 

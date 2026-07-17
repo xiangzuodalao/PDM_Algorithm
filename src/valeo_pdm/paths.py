@@ -28,5 +28,14 @@ def data_dir() -> Path:
     return repo_root() / "data"
 
 
+def resolve_repo_path(path: str | Path) -> Path:
+    """将相对路径稳定地按项目根目录解析，而不是依赖进程工作目录。"""
+
+    candidate = Path(path).expanduser()
+    if candidate.is_absolute():
+        return candidate.resolve()
+    return (repo_root(Path(__file__).resolve().parent) / candidate).resolve()
+
+
 def checkpoints_dir() -> Path:
     return artifacts_dir() / "checkpoints"

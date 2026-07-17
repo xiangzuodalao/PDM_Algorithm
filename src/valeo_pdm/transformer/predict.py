@@ -7,13 +7,13 @@ import numpy as np
 import pandas as pd
 import torch
 
-from valeo_pdm.db.data_reader import load_postgres_timeseries
-from valeo_pdm.paths import configs_dir
+from valeo_pdm.db.data_reader import load_postgres_timeseries, load_sqlserver_timeseries
+from valeo_pdm.paths import configs_dir, resolve_repo_path
 from valeo_pdm.transformer.artifacts import resolve_checkpoint_path
+from valeo_pdm.transformer.data import clean_and_resample_timeseries
 from valeo_pdm.transformer.models.autoformer import Autoformer
 from valeo_pdm.transformer.models.informer import Informer
 from valeo_pdm.transformer.train_testmodel import SimpleGRUForecast
-from valeo_pdm.transformer.train_informer import normalize_columns, parse_time, resample_group
 
 # ==========================================
 #  引入全局模型缓存池（避免每次读硬盘）
@@ -49,7 +49,6 @@ def _get_cached_informer(ckpt_path: str, device: torch.device):
             model.eval()
             _MODEL_CACHE[ckpt_path] = (model, m, s, sl, pl)
         return _MODEL_CACHE[ckpt_path]
-
 
 
 def _clean_residuals(residuals: np.ndarray) -> np.ndarray:
@@ -91,7 +90,12 @@ def _freq_desc(freq: str) -> str:
 
 
 def build_api_response_informer(
-    equipment_code: str, meas_code: str, freq: str, future_times, future_values, original_history_data: pd.DataFrame
+    equipment_code: str,
+    meas_code: str,
+    freq: str,
+    future_times,
+    future_values,
+    original_history_data: pd.DataFrame,
 ) -> Dict[str, Any]:
     values = [
         {
@@ -118,7 +122,12 @@ def build_api_response_informer(
 
 
 def build_api_response_autoformer(
-    equipment_code: str, meas_code: str, freq: str, future_times, future_values, original_history_data: pd.DataFrame
+    equipment_code: str,
+    meas_code: str,
+    freq: str,
+    future_times,
+    future_values,
+    original_history_data: pd.DataFrame,
 ) -> Dict[str, Any]:
     values = [
         {
@@ -145,18 +154,53 @@ def build_api_response_autoformer(
 
 
 def _postgres_config_path() -> str:
-    return os.getenv("VALEO_PDM_POSTGRES_CONFIG") or str((configs_dir() / "postgres_config.json").resolve())
+    return os.getenv("VALEO_PDM_POSTGRES_CONFIG") or str(
+        (configs_dir() / "postgres_config.json").resolve()
+    )
+
+
+def _load_prediction_rows(
+    *,
+    source: str,
+    data_path: str,
+    config_path: str,
+    equipment_code: str,
+    meas_code: str,
+    days_back: int,
+) -> pd.DataFrame:
+    normalized_source = str(source).strip().lower()
+    if normalized_source == "csv":
+        if not data_path:
+            raise ValueError("CSV 预测缺少 data_path")
+        return pd.read_csv(resolve_repo_path(data_path))
+    if normalized_source == "sqlserver":
+        return load_sqlserver_timeseries(
+            config_path,
+            equipment_code,
+            meas_code,
+            days_back=days_back,
+        )
+    if normalized_source in {"db", "postgres"}:
+        return load_postgres_timeseries(
+            config_path,
+            equipment_code,
+            meas_code,
+            days_back=days_back,
+        )
+    raise ValueError(f"不支持的预测数据源: {normalized_source}")
 
 
 def predict_informer_api(
-        equipment_code: str,
-        meas_code: str,
-        freq: str,
-        days_back: int,
-        ckpt_path: str,
-        config_path: str,
-        add_residual: bool = True,
-        residual_strength: float = 0.8,
+    equipment_code: str,
+    meas_code: str,
+    freq: str,
+    days_back: int,
+    ckpt_path: str,
+    config_path: str,
+    source: str = "postgres",
+    data_path: str = "",
+    add_residual: bool = True,
+    residual_strength: float = 0.8,
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -164,12 +208,21 @@ def predict_informer_api(
     model, m, s, sl, pl = _get_cached_informer(ckpt_path, device)
 
     # 获取数据
-    df = load_postgres_timeseries(config_path, equipment_code, meas_code, days_back=days_back)
-    df = normalize_columns(df)
-    df = parse_time(df)
-    g = df[df["meas_code"] == meas_code] if "meas_code" in df.columns else df
-    sd = resample_group(g, freq=freq)
-    vals = pd.to_numeric(sd["value"], errors="coerce").dropna().to_numpy(dtype=np.float32)
+    df = _load_prediction_rows(
+        source=source,
+        data_path=data_path,
+        config_path=config_path,
+        equipment_code=equipment_code,
+        meas_code=meas_code,
+        days_back=days_back,
+    )
+    sd, _quality = clean_and_resample_timeseries(
+        df,
+        freq,
+        equipment_code=equipment_code,
+        meas_code=meas_code,
+    )
+    vals = sd["value"].to_numpy(dtype=np.float32)
 
     if len(vals) < sl:
         return build_api_response_informer(equipment_code, meas_code, freq, [], [], df)
@@ -196,7 +249,7 @@ def predict_informer_api(
             start_idx = len(vals) - sl - hist_len + i
             if start_idx < 0:
                 continue
-            hist_x = vals[start_idx: start_idx + sl]
+            hist_x = vals[start_idx : start_idx + sl]
             actual_idx = start_idx + sl
             if actual_idx < len(vals):
                 batch_inputs.append(hist_x)
@@ -209,7 +262,9 @@ def predict_informer_api(
             batch_x_t = torch.from_numpy(batch_inputs_norm[..., None]).to(device)
 
             # 3. 分块推理 (Mini-Batch)，防止 CPU/GPU 瞬间打满和内存溢出
-            chunk_size = 64  # 【关键参数】如果 CPU 还是吃紧，可以调小到 32；如果性能有余，可以调大到 128
+            chunk_size = (
+                64  # 【关键参数】如果 CPU 还是吃紧，可以调小到 32；如果性能有余，可以调大到 128
+            )
             all_first_step_preds = []
 
             with torch.no_grad():
@@ -232,7 +287,9 @@ def predict_informer_api(
 
             if len(raw_residuals) > 5:
                 clean_res = _clean_residuals(raw_residuals)
-                y_pred_den = y_pred_den + _generate_future_residuals(clean_res, pl, residual_strength)
+                y_pred_den = y_pred_den + _generate_future_residuals(
+                    clean_res, pl, residual_strength
+                )
 
     # 组装未来时间
     latest_ts = sd.index.max()
@@ -247,7 +304,9 @@ def predict_informer_api(
     except Exception:
         future_times = [pd.Timestamp(latest_ts)] * pl
 
-    return build_api_response_informer(equipment_code, meas_code, freq, list(future_times), list(y_pred_den), df)
+    return build_api_response_informer(
+        equipment_code, meas_code, freq, list(future_times), list(y_pred_den), df
+    )
 
 
 def predict_informer_api_default():
@@ -263,6 +322,8 @@ def predict_testmodel_api(
     days_back: int,
     ckpt_path: str,
     config_path: str,
+    source: str = "postgres",
+    data_path: str = "",
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     c = torch.load(ckpt_path, map_location=device)
@@ -281,12 +342,21 @@ def predict_testmodel_api(
     model.load_state_dict(c["model"])
     model.eval()
 
-    df = load_postgres_timeseries(config_path, equipment_code, meas_code, days_back=days_back)
-    df = normalize_columns(df)
-    df = parse_time(df)
-    g = df[df["meas_code"] == meas_code] if "meas_code" in df.columns else df
-    sd = resample_group(g, freq=freq)
-    vals = pd.to_numeric(sd["value"], errors="coerce").dropna().to_numpy(dtype=np.float32)
+    df = _load_prediction_rows(
+        source=source,
+        data_path=data_path,
+        config_path=config_path,
+        equipment_code=equipment_code,
+        meas_code=meas_code,
+        days_back=days_back,
+    )
+    sd, _quality = clean_and_resample_timeseries(
+        df,
+        freq,
+        equipment_code=equipment_code,
+        meas_code=meas_code,
+    )
+    vals = sd["value"].to_numpy(dtype=np.float32)
     if len(vals) < sl:
         return build_api_response_informer(equipment_code, meas_code, freq, [], [], df)
     x = vals[-sl:]
@@ -307,7 +377,9 @@ def predict_testmodel_api(
         future_times = pd.date_range(start=start, periods=pl, freq=freq)
     except Exception:
         future_times = [pd.Timestamp(latest_ts)] * pl
-    return build_api_response_informer(equipment_code, meas_code, freq, list(future_times), list(y_pred_den), df)
+    return build_api_response_informer(
+        equipment_code, meas_code, freq, list(future_times), list(y_pred_den), df
+    )
 
 
 def predict_autoformer_api(
@@ -317,6 +389,8 @@ def predict_autoformer_api(
     days_back: int,
     ckpt_path: str,
     config_path: str,
+    source: str = "csv",
+    data_path: str = "",
     add_residual: bool = True,
     residual_strength: float = 0.8,
 ):
@@ -342,12 +416,23 @@ def predict_autoformer_api(
     model.load_state_dict(c["model"])
     model.eval()
 
-    df = load_postgres_timeseries(config_path, equipment_code, meas_code, days_back=days_back)
-    df = normalize_columns(df)
-    df = parse_time(df)
-    g = df[df["meas_code"] == meas_code] if "meas_code" in df.columns else df
-    sd = resample_group(g, freq=freq)
-    vals = pd.to_numeric(sd["value"], errors="coerce").dropna().to_numpy(dtype=np.float32)
+    if str(source).strip().lower() != "csv":
+        raise ValueError("Autoformer 仅支持 CSV 数据源")
+    df = _load_prediction_rows(
+        source=source,
+        data_path=data_path,
+        config_path=config_path,
+        equipment_code=equipment_code,
+        meas_code=meas_code,
+        days_back=days_back,
+    )
+    sd, _quality = clean_and_resample_timeseries(
+        df,
+        freq,
+        equipment_code=equipment_code,
+        meas_code=meas_code,
+    )
+    vals = sd["value"].to_numpy(dtype=np.float32)
     if len(vals) < sl:
         return build_api_response_autoformer(equipment_code, meas_code, freq, [], [], df)
     x = vals[-sl:]
@@ -389,4 +474,6 @@ def predict_autoformer_api(
         future_times = pd.date_range(start=start, periods=pl, freq=freq)
     except Exception:
         future_times = [pd.Timestamp(latest_ts)] * pl
-    return build_api_response_autoformer(equipment_code, meas_code, freq, list(future_times), list(y_pred_den), df)
+    return build_api_response_autoformer(
+        equipment_code, meas_code, freq, list(future_times), list(y_pred_den), df
+    )
