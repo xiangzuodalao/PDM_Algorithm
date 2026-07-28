@@ -37,7 +37,9 @@ def locked_package_names() -> set[str]:
 def compose_service() -> dict[str, Any]:
     docker = shutil.which("docker")
     if docker is None:
-        pytest.skip("Docker CLI is unavailable; semantic Compose validation requires Docker Compose v2")
+        pytest.skip(
+            "Docker CLI is unavailable; semantic Compose validation requires Docker Compose v2"
+        )
 
     version = subprocess.run(
         [docker, "compose", "version"],
@@ -67,7 +69,15 @@ def compose_service() -> dict[str, Any]:
 
     try:
         result = subprocess.run(
-            [docker, "compose", "-f", str(ROOT / "docker-compose.yml"), "config", "--format", "json"],
+            [
+                docker,
+                "compose",
+                "-f",
+                str(ROOT / "docker-compose.yml"),
+                "config",
+                "--format",
+                "json",
+            ],
             cwd=ROOT,
             check=True,
             text=True,
@@ -130,7 +140,9 @@ def option_has_value(tokens: list[str], option: str, expected: str) -> bool:
 
 
 def token_has_value(tokens: list[str], option: str, expected: str) -> bool:
-    return any(token == option and next_token == expected for token, next_token in zip(tokens, tokens[1:]))
+    return any(
+        token == option and next_token == expected for token, next_token in zip(tokens, tokens[1:])
+    )
 
 
 def test_runtime_dependencies_match_the_approved_cpu_contract() -> None:
