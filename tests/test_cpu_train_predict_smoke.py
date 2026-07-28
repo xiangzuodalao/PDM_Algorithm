@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import os
 import subprocess
@@ -53,12 +54,32 @@ models:
     )
 
     console = Path(sys.executable).with_name("valeo-pdm")
-    environment = os.environ.copy()
-    environment["VALEO_PDM_ROOT"] = str(root)
-    environment["MPLBACKEND"] = "Agg"
-    environment.pop("VALEO_PDM_MODEL_REGISTRY", None)
-    environment.pop("VALEO_PDM_POSTGRES_CONFIG", None)
-    environment.pop("VALEO_PDM_SQLSERVER_CONFIG", None)
+    guard_report_path = root / "child-guard-report.json"
+    network_attempt_path = root / "child-network-attempts.jsonl"
+    guard_dir = Path(__file__).parent / "support" / "child_guard"
+    child_home = root / "home"
+    child_cache = root / "cache"
+    child_home.mkdir()
+    child_cache.mkdir()
+    monkeypatch.setenv("PDM_TEST_INHERITED_SECRET", "must-not-reach-child")
+    environment = {
+        "CUDA_VISIBLE_DEVICES": "",
+        "HOME": str(child_home),
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "MPLBACKEND": "Agg",
+        "MPLCONFIGDIR": str(child_cache / "matplotlib"),
+        "PATH": os.pathsep.join((str(console.parent), "/usr/bin", "/bin")),
+        "PDM_CHILD_GUARD_REPORT": str(guard_report_path),
+        "PDM_CHILD_NETWORK_SENTINEL": str(network_attempt_path),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONPATH": str(guard_dir),
+        "VALEO_PDM_ROOT": str(root),
+        "XDG_CACHE_HOME": str(child_cache),
+    }
+    if library_path := os.environ.get("LD_LIBRARY_PATH"):
+        environment["LD_LIBRARY_PATH"] = library_path
     result = subprocess.run(
         [str(console), "train", "-e", "CPU-SMOKE", "-m", "TEMP"],
         cwd=root,
@@ -69,6 +90,27 @@ models:
         check=False,
     )
     assert result.returncode == 0, f"stdout:\n{result.stdout}\n\nstderr:\n{result.stderr}"
+
+    assert guard_report_path.is_file()
+    guard_report = json.loads(guard_report_path.read_text(encoding="utf-8"))
+    assert guard_report["guard_loaded"] is True
+    assert Path(guard_report["guard_file"]).resolve() == (guard_dir / "sitecustomize.py").resolve()
+    assert Path(guard_report["executable"]).resolve() == Path(sys.executable).resolve()
+    assert guard_report["pid"] != os.getpid()
+    assert guard_report["cuda_visible_devices"] == ""
+    assert guard_report["torch_version_cuda"] is None
+    assert guard_report["cuda_available"] is False
+    assert guard_report["blocked_connectors"] == [
+        "psycopg2.connect",
+        "pyodbc.connect",
+        "socket.create_connection",
+        "socket.socket.connect",
+        "socket.socket.connect_ex",
+    ]
+    assert "PDM_TEST_INHERITED_SECRET" not in guard_report["environment_keys"]
+    assert not network_attempt_path.exists(), (
+        network_attempt_path.read_text(encoding="utf-8") if network_attempt_path.exists() else ""
+    )
 
     checkpoint = (
         root / "artifacts" / "checkpoints" / "exp_CPU-SMOKE_TEMP_informer" / "informer_best.pt"
