@@ -113,12 +113,12 @@ uvicorn valeo_pdm.api.app:app --host 0.0.0.0 --port 8000
 - 数据检查：`POST /measPredict/checkData`
 - 健康检查：`GET /healthz`
 
-### Codex MCP Demo
+### Codex MCP 接入
 
-- MCP Server：`integrations/pdm_mcp`，使用独立 uv 环境，不加入算法项目依赖。
-- 训练 Skill：`.agents/skills/pdm-train-model`，固定执行“预览 → 用户下一轮确认 → 单次训练 → 状态/预测验证”。
+- 本仓只提供 PDM FastAPI 以及 `compose.mcp-smoke.yml` API 冒烟目标，不再维护 MCP Server 或训练 Skill 的副本。
+- 平台 MCP 由私有 `ifactory-platform` 总仓的 `components/digital-mcp` 维护；训练 Skill 由该总仓的 `.agents/skills` 维护。
 - 本地安全冒烟：`docker compose -f compose.mcp-smoke.yml up -d --build`，API 仅监听 `127.0.0.1:10022`，不挂载真实数据库配置。
-- 具体安装、工具契约和 Codex 注册命令见 `integrations/pdm_mcp/README.md`。
+- Codex 注册、工具契约和训练审批流程以私有 `ifactory-platform` 总仓为准。
 
 ### 数据源
 
