@@ -3,10 +3,13 @@ from __future__ import annotations
 import json
 import re
 import shlex
+import shutil
 import subprocess
 import tomllib
-from typing import Any
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,14 +35,57 @@ def locked_package_names() -> set[str]:
 
 
 def compose_service() -> dict[str, Any]:
-    result = subprocess.run(
-        ["docker", "compose", "-f", str(ROOT / "docker-compose.yml"), "config", "--format", "json"],
+    docker = shutil.which("docker")
+    if docker is None:
+        pytest.skip("Docker CLI is unavailable; semantic Compose validation requires Docker Compose v2")
+
+    version = subprocess.run(
+        [docker, "compose", "version"],
         cwd=ROOT,
-        check=True,
         text=True,
         capture_output=True,
+        check=False,
     )
-    compose = json.loads(result.stdout)
+    if version.returncode != 0:
+        pytest.skip(
+            "Docker Compose v2 is unavailable; semantic Compose validation requires "
+            f"`docker compose version` (stderr: {version.stderr.strip()!r})"
+        )
+
+    config_help = subprocess.run(
+        [docker, "compose", "config", "--help"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if config_help.returncode != 0 or "--format" not in config_help.stdout:
+        pytest.skip(
+            "Docker Compose `config --format json` is unavailable; semantic Compose validation "
+            f"requires JSON expansion (stderr: {config_help.stderr.strip()!r})"
+        )
+
+    try:
+        result = subprocess.run(
+            [docker, "compose", "-f", str(ROOT / "docker-compose.yml"), "config", "--format", "json"],
+            cwd=ROOT,
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+    except subprocess.CalledProcessError as error:
+        pytest.fail(
+            "docker compose config --format json failed unexpectedly "
+            f"(stdout: {error.stdout!r}; stderr: {error.stderr!r})"
+        )
+
+    try:
+        compose = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        pytest.fail(
+            "docker compose config --format json returned invalid JSON "
+            f"(stdout: {result.stdout!r}; stderr: {result.stderr!r}; error: {error})"
+        )
     assert isinstance(compose, dict)
     services = compose.get("services")
     assert isinstance(services, dict)
@@ -192,14 +238,15 @@ def test_dockerfile_semantically_uses_cpu_only_runtime_contract() -> None:
     assert option_has_value(sync_tokens, "--python", "3.12")
 
     installer = re.compile(
-        r"\\b(?:uv\\s+pip|uv\\s+tool|pip(?:\\d+(?:\\.\\d+)*)?|python(?:\\d+(?:\\.\\d+)*)?\\s+-m\\s+pip|"
-        r"pipx|conda|mamba|poetry|apt(?:-get)?|apk|dnf|yum)\\s+(?:install|add)\\b",
+        r"\b(?:uv\s+pip|uv\s+tool|pip(?:\d+(?:\.\d+)*)?|python(?:\d+(?:\.\d+)*)?\s+-m\s+pip|"
+        r"pipx|conda|mamba|poetry|apt(?:-get)?|apk|dnf|yum)\s+(?:install|add)\b",
         re.IGNORECASE,
     )
     forbidden_package = re.compile(
-        r"\\b(?:torch(?:vision)?|triton|nvidia[\\w.-]*|cuda[\\w.-]*)\\b", re.IGNORECASE
+        r"\b(?:torch(?:vision)?|triton|xlstm|mlstm-kernels|nvidia[\w.-]*|cuda[\w.-]*)\b",
+        re.IGNORECASE,
     )
-    cuda_index = re.compile(r"/whl/cu[\\w.-]*", re.IGNORECASE)
+    cuda_index = re.compile(r"/whl/cu[\w.-]*", re.IGNORECASE)
     for value in run_values:
         assert not cuda_index.search(value)
         if installer.search(value):
