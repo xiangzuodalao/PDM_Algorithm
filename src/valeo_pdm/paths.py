@@ -37,5 +37,22 @@ def resolve_repo_path(path: str | Path) -> Path:
     return (repo_root(Path(__file__).resolve().parent) / candidate).resolve()
 
 
+def resolve_data_path(path: str | Path) -> Path:
+    """只解析 `data/` 下的相对路径，并阻止 `..` 与符号链接越界。"""
+
+    raw = Path(path)
+    if raw.is_absolute() or ".." in raw.parts or len(raw.parts) < 2 or raw.parts[0] != "data":
+        raise ValueError("CSV 路径必须是 data/ 下的相对路径")
+    root = data_dir().resolve()
+    candidate = resolve_repo_path(raw)
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("CSV 路径解析后超出 data 目录") from exc
+    if not relative.parts:
+        raise ValueError("CSV 路径必须指向 data 目录内的文件")
+    return candidate
+
+
 def checkpoints_dir() -> Path:
     return artifacts_dir() / "checkpoints"

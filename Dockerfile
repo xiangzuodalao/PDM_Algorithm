@@ -69,9 +69,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 RUN uv pip install torch torchvision --index-url  https://download.pytorch.org/whl/cu128 --no-cache
 
 
-# 创建非特权用户，并将 /app 目录的所有权赋给它，避免权限问题
+# 创建非特权用户。代码与虚拟环境保持只读，仅预建运行时可写目录；
+# 避免递归 chown 复制整套 PyTorch/CUDA 环境形成巨大的镜像层。
 RUN useradd -m -u 10001 appuser \
-    && chown -R appuser:appuser /app
+    && install -d -o appuser -g appuser /app/artifacts /app/data
 
 # 切换到非特权用户
 USER appuser

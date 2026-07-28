@@ -1,21 +1,39 @@
 from __future__ import annotations
 
-import os
 import asyncio
-from typing import Any, Dict, List, Optional
+import hmac
+import os
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, StrictInt
 
-from valeo_pdm.paths import configs_dir, resolve_repo_path
-from valeo_pdm.training.from_config import save_train_params
-from valeo_pdm.training.registry import get_trainer
+from valeo_pdm.paths import configs_dir, resolve_data_path
 from valeo_pdm.training.from_config import _format_metrics_desc  # reuse short description formatter
+from valeo_pdm.training.from_config import save_train_params
+from valeo_pdm.training.plan import (
+    TrainingPlan,
+    TrainingPlanError,
+    build_training_plan,
+    validate_model_info_id,
+)
 from valeo_pdm.db.train_status import SqlServerTrainStatusUpdater, upload_forecast_image
+from valeo_pdm.training.registry import get_trainer
+from valeo_pdm.training.run_control import (
+    create_training_run,
+    ensure_run_target_available,
+    finite_metric,
+    mark_interrupted_if_stale,
+    read_manifest,
+    resolve_safe_run_dir,
+    training_run_lock,
+    update_manifest,
+)
 from valeo_pdm.transformer.artifacts import (
     checkpoint_filename,
     resolve_checkpoint_path,
-    training_output_dir,
 )
 from valeo_pdm.transformer.config import get_model_config, list_all_models
 from valeo_pdm.transformer.data import (
@@ -37,6 +55,7 @@ MODEL_PREDICT_FUNCS = {
     "testmodel": predict_testmodel_api,
     "autoformer": predict_autoformer_api,
 }
+# 场景 onboarding 工具通过 AST 读取该常量，必须保留为本文件中的字面量赋值。
 API_TRAIN_MODEL_TYPES = frozenset({"informer", "autoformer"})
 
 
@@ -103,6 +122,8 @@ class TrainRequest(BaseModel):
     ModelType: Optional[str] = None
     ParamArr: List[ParamItem]
     DataSource: str
+    ExpectedPlanHash: Optional[str] = None
+    ExecutionMode: Literal["platform", "local_only"] = "platform"
 
 
 class TrainResponse(BaseModel):
@@ -114,6 +135,28 @@ class TrainResponse(BaseModel):
     test_loss: Optional[float] = None
     run_dir: Optional[str] = None
     train_params: Dict[str, Any] = Field(default_factory=dict)
+    plan_hash: str
+    status: Literal["succeeded"] = "succeeded"
+
+
+class TrainPreviewResponse(BaseModel):
+    success: bool
+    msg: str
+    plan_hash: str
+    plan: Dict[str, Any]
+
+
+class TrainStatusResponse(BaseModel):
+    success: bool
+    msg: str
+    model_info_id: str
+    status: Literal["reserved", "running", "succeeded", "failed", "interrupted"]
+    created_at: Optional[str] = None
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+    best_val: Optional[float] = None
+    test_loss: Optional[float] = None
+    error_code: Optional[str] = None
 
 
 class DataCheckRequest(BaseModel):
@@ -145,335 +188,296 @@ def _sqlserver_config_path() -> str:
 
 
 def _resolve_csv_path(path_str: str) -> str:
-    return str(resolve_repo_path(path_str))
+    return str(resolve_data_path(path_str))
 
 
-PARAM_CASTERS: Dict[str, Any] = {
-    "seq_len": int,
-    "label_len": int,
-    "pred_len": int,
-    "batch_size": int,
-    "epochs": int,
-    "lr": float,
-    "d_model": int,
-    "n_heads": int,
-    "d_ff": int,
-    "dropout": float,
-    "e_layers": int,
-    "d_layers": int,
-    "attn_type": str,
-    "distil": bool,
-    "patience": int,
-    "lr_factor": float,
-    "lr_patience": int,
-    "weight_decay": float,
-    "grad_clip": float,
-    "stride": int,
-    "moving_avg": int,
-}
-
-INFORMER_DEFAULTS: Dict[str, Any] = {
-    "seq_len": 672,
-    "label_len": 192,
-    "pred_len": 288,
-    "batch_size": 32,
-    "epochs": 100,
-    "lr": 5e-4,
-    "d_model": 256,
-    "n_heads": 8,
-    "d_ff": 512,
-    "dropout": 0.1,
-    "e_layers": 2,
-    "d_layers": 2,
-    "attn_type": "prob",
-    "distil": True,
-    "patience": 10,
-    "lr_factor": 0.5,
-    "lr_patience": 5,
-    "weight_decay": 0.0,
-    "grad_clip": 0.5,
-    "stride": 1,
-}
-
-AUTOFORMER_DEFAULTS: Dict[str, Any] = {
-    "seq_len": 672,
-    "label_len": 288,
-    "pred_len": 288,
-    "batch_size": 128,
-    "epochs": 120,
-    "lr": 3e-4,
-    "moving_avg": 25,
-    "d_model": 256,
-    "n_heads": 8,
-    "d_ff": 512,
-    "dropout": 0.1,
-    "e_layers": 2,
-    "d_layers": 2,
-    "patience": 8,
-    "lr_factor": 0.5,
-    "lr_patience": 4,
-    "weight_decay": 1e-4,
-    "grad_clip": 0.5,
-    "stride": 1,
-}
+def _request_plan(request: TrainRequest) -> TrainingPlan:
+    config = get_model_config(request.EquipmentCode, request.MeasCode)
+    return build_training_plan(
+        equipment_code=request.EquipmentCode,
+        meas_code=request.MeasCode,
+        model_info_id=request.ModelInfoID,
+        requested_model_type=request.ModelType,
+        param_items=((item.FieldName, item.CurValue) for item in request.ParamArr),
+        requested_source=request.DataSource,
+        execution_mode=request.ExecutionMode,
+        model_config=config,
+    )
 
 
-def _parse_bool(raw: Any) -> bool:
-    if isinstance(raw, bool):
-        return raw
-    if isinstance(raw, (int, float)):
-        return raw != 0
-    if isinstance(raw, str):
-        val = raw.strip().lower()
-        if val in {"true", "1", "yes", "y", "on"}:
-            return True
-        if val in {"false", "0", "no", "n", "off"}:
-            return False
-    raise ValueError(f"无法解析布尔值: {raw}")
+def _http_plan_error(exc: TrainingPlanError) -> HTTPException:
+    return HTTPException(
+        status_code=exc.status_code,
+        detail=str(exc),
+        headers={"X-PDM-Error-Code": exc.code},
+    )
 
 
-def _convert_param(name: str, raw: Any) -> Any:
-    caster = PARAM_CASTERS.get(name)
-    if not caster:
-        raise HTTPException(status_code=400, detail=f"不支持的训练参数: {name}")
+def _hash_required() -> bool:
+    return os.getenv("VALEO_PDM_REQUIRE_TRAIN_PLAN_HASH", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _verify_expected_hash(plan: TrainingPlan, expected_hash: str | None) -> None:
+    if not expected_hash:
+        if _hash_required():
+            raise TrainingPlanError(
+                "训练前必须先调用 preview 并提交 ExpectedPlanHash",
+                status_code=428,
+                code="PLAN_HASH_REQUIRED",
+            )
+        return
+    if not hmac.compare_digest(plan.plan_hash, expected_hash.strip().lower()):
+        raise TrainingPlanError(
+            "训练计划已变化，请重新 preview 并确认",
+            status_code=409,
+            code="PLAN_HASH_MISMATCH",
+        )
+
+
+def _database_config_for_plan(plan: TrainingPlan) -> str | None:
+    if plan.source == "sqlserver":
+        return _sqlserver_config_path()
+    if plan.source in {"db", "postgres"}:
+        return _postgres_config_path()
+    return None
+
+
+def _invoke_trainer(plan: TrainingPlan, save_dir: str) -> dict[str, Any]:
+    params = plan.train_params
+    trainer = get_trainer(plan.model_type)
+    common_kwargs = dict(
+        source=plan.source,
+        data=_resolve_csv_path(plan.data_path) if plan.source == "csv" else "",
+        equipment_code=plan.equipment_code,
+        meas_code=plan.meas_code,
+        days_back=plan.days_back,
+        freq=plan.freq,
+        config=_database_config_for_plan(plan),
+    )
+    if plan.model_type == "informer":
+        return trainer(
+            **common_kwargs,
+            seq_len=params["seq_len"],
+            label_len=params["label_len"],
+            pred_len=params["pred_len"],
+            batch_size=params["batch_size"],
+            epochs=params["epochs"],
+            lr=params["lr"],
+            save=save_dir,
+            d_model=params["d_model"],
+            n_heads=params["n_heads"],
+            d_ff=params["d_ff"],
+            dropout=params["dropout"],
+            e_layers=params["e_layers"],
+            d_layers=params["d_layers"],
+            attn_type=params["attn_type"],
+            distil_flag="true" if params["distil"] else "false",
+            early_stop=True,
+            patience=params["patience"],
+            lr_sched=True,
+            lr_factor=params["lr_factor"],
+            lr_patience=params["lr_patience"],
+            weight_decay=params["weight_decay"],
+            grad_clip=params["grad_clip"],
+            stride=params["stride"],
+        )
+    return trainer(
+        **common_kwargs,
+        seq_len=params["seq_len"],
+        label_len=params["label_len"],
+        pred_len=params["pred_len"],
+        batch_size=params["batch_size"],
+        epochs=params["epochs"],
+        lr=params["lr"],
+        save=save_dir,
+        moving_avg=params["moving_avg"],
+        d_model=params["d_model"],
+        n_heads=params["n_heads"],
+        d_ff=params["d_ff"],
+        dropout=params["dropout"],
+        e_layers=params["e_layers"],
+        d_layers=params["d_layers"],
+        early_stop=True,
+        patience=params["patience"],
+        lr_sched=True,
+        lr_factor=params["lr_factor"],
+        lr_patience=params["lr_patience"],
+        weight_decay=params["weight_decay"],
+        grad_clip=params["grad_clip"],
+        stride=params["stride"],
+    )
+
+
+def _validated_training_checkpoint(
+    plan: TrainingPlan, run_dir: Path, result: dict[str, Any]
+) -> Path:
+    raw = result.get("best_path")
+    if not isinstance(raw, (str, os.PathLike)):
+        raise RuntimeError("trainer did not return best_path")
+    declared = Path(raw)
+    if declared.is_symlink():
+        raise RuntimeError("trainer checkpoint cannot be a symlink")
     try:
-        if name in {"seq_len", "label_len", "pred_len", "stride"} and (
-            isinstance(raw, bool) or not isinstance(raw, int)
-        ):
-            raise ValueError
-        if caster is bool:
-            return _parse_bool(raw)
-        return caster(raw)
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail=f"训练参数[{name}]的值无效: {raw}")
+        resolved = declared.resolve(strict=True)
+    except OSError as exc:
+        raise RuntimeError("trainer checkpoint does not exist") from exc
+    expected = (run_dir / checkpoint_filename(plan.model_type)).resolve(strict=False)
+    if resolved != expected or not resolved.is_file():
+        raise RuntimeError("trainer checkpoint is outside the reserved run directory")
+    return resolved
 
 
-def _build_train_params(param_arr: List[ParamItem]) -> Dict[str, Any]:
-    params: Dict[str, Any] = {}
-    for item in param_arr:
-        name = item.FieldName
-        if name not in PARAM_CASTERS:
-            raise HTTPException(status_code=400, detail=f"不支持的训练参数: {name}")
-        params[name] = _convert_param(name, item.CurValue)
-    return params
+@router.post(
+    "/train/preview",
+    response_model=TrainPreviewResponse,
+    summary="解析并预览无副作用的训练计划",
+)
+def preview_training(request: TrainRequest):
+    try:
+        plan = _request_plan(request)
+        ensure_run_target_available(plan)
+    except TrainingPlanError as exc:
+        raise _http_plan_error(exc) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="训练计划解析失败") from exc
+    return TrainPreviewResponse(
+        success=True,
+        msg="训练计划预览成功",
+        plan_hash=plan.plan_hash,
+        plan=plan.as_dict(),
+    )
 
 
 @router.post("/train", response_model=TrainResponse, summary="训练模型并按 ModelInfoID 分目录保存")
 def train_model(request: TrainRequest):
+    return _execute_train_model(request)
+
+
+def _platform_status_updater(plan: TrainingPlan) -> SqlServerTrainStatusUpdater | None:
+    if plan.execution_mode != "platform":
+        return None
     try:
-        cfg = _postgres_config_path()
-        sqlserver_cfg_path = _sqlserver_config_path()
-        status_updater = None
-        training_started = False
-        try:
-            status_updater = SqlServerTrainStatusUpdater.from_json(sqlserver_cfg_path)
-        except FileNotFoundError:
-            status_updater = None
-        except ModuleNotFoundError as e:
-            # 不阻塞训练，打印提示
-            print(f"SQL Server 状态回写缺少依赖: {e}")
-        except Exception as e:
-            print(f"初始化 SQL Server 状态回写失败: {e}")
+        return SqlServerTrainStatusUpdater.from_json(_sqlserver_config_path())
+    except (FileNotFoundError, ModuleNotFoundError):
+        return None
+    except Exception:
+        print("初始化 SQL Server 训练状态回写失败，已继续本地训练。")
+        return None
 
-        config = get_model_config(request.EquipmentCode, request.MeasCode)
-        if not config:
-            raise HTTPException(
-                status_code=404,
-                detail=f"未找到设备[{request.EquipmentCode}]参数[{request.MeasCode}]的模型配置",
+
+def _execute_train_model(request: TrainRequest) -> TrainResponse:
+    run_dir = None
+    status_updater = None
+    training_started = False
+    try:
+        initial_plan = _request_plan(request)
+        _verify_expected_hash(initial_plan, request.ExpectedPlanHash)
+
+        with training_run_lock(initial_plan):
+            # 锁内重新读取 DB/YAML 配置，避免 preview 后配置变化造成 TOCTOU。
+            plan = _request_plan(request)
+            _verify_expected_hash(plan, request.ExpectedPlanHash)
+            run_dir = create_training_run(plan)
+            update_manifest(
+                run_dir,
+                status="running",
+                started_at=datetime.now(UTC).isoformat(),
+                pid=os.getpid(),
             )
+            training_started = True
+            status_updater = _platform_status_updater(plan)
+            if status_updater is not None:
+                try:
+                    status_updater.mark_running(plan.model_info_id, "Training")
+                except Exception:
+                    print("SQL Server 状态回写(训练中)失败，已继续本地训练。")
 
-        req_model_type = request.ModelType or config.get("model_type", "informer")
-        model_type = str(req_model_type).lower()
-        source = config.get("source", "db")
-
-        if request.DataSource == "sqlserver":
-            cfg = _sqlserver_config_path()
-            source = "sqlserver"  # 同步更新 source
-        elif request.DataSource in ["db", "postgres"]:
-            cfg = _postgres_config_path()
-            source = request.DataSource  # 同步更新 source (例如 "postgres")
-        else:
-            # 如果请求中没有传递 DataSource，则回退使用配置中的 source
-            if source == "sqlserver":
-                cfg = _sqlserver_config_path()
-                print(f"命中数据源: {request.DataSource} == {source}")
-            elif source in ["db", "postgres"]:
-                cfg = _postgres_config_path()
-            else:
-                cfg = None  # CSV 不需要数据库配置
-
-        print(f"数据源: {request.DataSource} == {source}")
-        freq = config.get("freq", "15min")
-        days_back = int(config.get("days_back", 365))
-        data_path = config.get("data_path", "")
-
-        config_train_params = config.get("train_params", {}) or {}
-        override_params = _build_train_params(request.ParamArr)
-        if model_type not in API_TRAIN_MODEL_TYPES:
-            raise HTTPException(status_code=400, detail=f"不支持的模型类型: {model_type}")
-        if model_type == "informer":
-            merged_params = {**INFORMER_DEFAULTS, **config_train_params, **override_params}
-        else:
-            merged_params = {**AUTOFORMER_DEFAULTS, **config_train_params, **override_params}
-        try:
-            validate_window_params(
-                merged_params["seq_len"],
-                merged_params["label_len"],
-                merged_params["pred_len"],
-                merged_params.get("stride", 1),
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-        if not request.ModelInfoID:
-            raise HTTPException(status_code=400, detail="ModelInfoID 不能为空")
-
-        base_dir = training_output_dir(
-            request.EquipmentCode, request.MeasCode, model_type
-        ).resolve()
-        run_dir = (base_dir / request.ModelInfoID).resolve()
-        save_dir = str(run_dir)
-        trainer = get_trainer(model_type)
-        if status_updater:
             try:
-                status_updater.mark_running(request.ModelInfoID, "Training")
-                training_started = True
-            except Exception as e:
-                print(f"SQL Server 状态回写(训练中)失败: {e}")
-
-        common_kwargs = dict(
-            source=source,
-            data=_resolve_csv_path(data_path) if source == "csv" else "",
-            equipment_code=request.EquipmentCode,
-            meas_code=request.MeasCode,
-            days_back=days_back,
-            freq=freq,
-            config=cfg,
-        )
-
-        if model_type in {"informer", "testmodel"}:
-            distil_raw = merged_params.get("distil", True)
-            try:
-                distil_bool = (
-                    distil_raw if isinstance(distil_raw, bool) else _parse_bool(distil_raw)
+                result = _invoke_trainer(plan, str(run_dir))
+                if not isinstance(result, dict):
+                    raise TypeError("trainer result must be a mapping")
+                best_path = _validated_training_checkpoint(plan, run_dir, result)
+                save_train_params(
+                    str(run_dir),
+                    plan.equipment_code,
+                    plan.meas_code,
+                    plan.model_type,
+                    plan.source,
+                    plan.freq,
+                    plan.days_back,
+                    plan.data_path,
+                    plan.train_params,
                 )
-            except ValueError:
-                raise HTTPException(
-                    status_code=400, detail=f"训练参数[distil]的值无效: {distil_raw}"
+            except Exception:
+                update_manifest(
+                    run_dir,
+                    status="failed",
+                    finished_at=datetime.now(UTC).isoformat(),
+                    error_code="TRAINING_FAILED",
                 )
+                if status_updater is not None:
+                    try:
+                        status_updater.mark_failed(plan.model_info_id, "Training failed")
+                    except Exception:
+                        print("SQL Server 状态回写(失败)失败。")
+                raise
 
-            result = trainer(
-                **common_kwargs,
-                seq_len=int(merged_params["seq_len"]),
-                label_len=int(merged_params["label_len"]),
-                pred_len=int(merged_params["pred_len"]),
-                batch_size=int(merged_params["batch_size"]),
-                epochs=int(merged_params["epochs"]),
-                lr=float(merged_params["lr"]),
-                save=save_dir,
-                d_model=int(merged_params["d_model"]),
-                n_heads=int(merged_params.get("n_heads", 4)),
-                d_ff=int(merged_params.get("d_ff", 256)),
-                dropout=float(merged_params["dropout"]),
-                e_layers=int(merged_params.get("e_layers", 2)),
-                d_layers=int(merged_params.get("d_layers", 2)),
-                attn_type=str(merged_params.get("attn_type", "prob")),
-                distil_flag="true" if distil_bool else "false",
-                early_stop=True,
-                patience=int(merged_params["patience"]),
-                lr_sched=True,
-                lr_factor=float(merged_params["lr_factor"]),
-                lr_patience=int(merged_params["lr_patience"]),
-                weight_decay=float(merged_params["weight_decay"]),
-                grad_clip=float(merged_params["grad_clip"]),
-                stride=int(merged_params["stride"]),
+            best_val = finite_metric(result.get("best_val"))
+            test_loss = finite_metric(result.get("test_loss"))
+            if status_updater is not None:
+                try:
+                    description = _format_metrics_desc(best_val, test_loss)
+                    forecast_path = (result.get("plots") or {}).get("forecast")
+                    attachments = upload_forecast_image(forecast_path) if forecast_path else None
+                    status_updater.mark_success(
+                        plan.model_info_id, description, attachments=attachments
+                    )
+                except Exception:
+                    print("SQL Server 状态回写或预测图上传失败，本地训练结果仍然有效。")
+
+            update_manifest(
+                run_dir,
+                status="succeeded",
+                finished_at=datetime.now(UTC).isoformat(),
+                best_val=best_val,
+                test_loss=test_loss,
+                error_code=None,
             )
-        else:
-            if source != "csv":
-                raise HTTPException(status_code=400, detail="Autoformer 目前仅支持 CSV 数据源")
-            result = trainer(
-                **common_kwargs,
-                seq_len=int(merged_params["seq_len"]),
-                label_len=int(merged_params["label_len"]),
-                pred_len=int(merged_params["pred_len"]),
-                batch_size=int(merged_params["batch_size"]),
-                epochs=int(merged_params["epochs"]),
-                lr=float(merged_params["lr"]),
-                save=save_dir,
-                moving_avg=int(merged_params["moving_avg"]),
-                d_model=int(merged_params["d_model"]),
-                n_heads=int(merged_params["n_heads"]),
-                d_ff=int(merged_params["d_ff"]),
-                dropout=float(merged_params["dropout"]),
-                e_layers=int(merged_params["e_layers"]),
-                d_layers=int(merged_params["d_layers"]),
-                early_stop=True,
-                patience=int(merged_params["patience"]),
-                lr_sched=True,
-                lr_factor=float(merged_params["lr_factor"]),
-                lr_patience=int(merged_params["lr_patience"]),
-                weight_decay=float(merged_params["weight_decay"]),
-                grad_clip=float(merged_params["grad_clip"]),
-                stride=int(merged_params["stride"]),
+            return TrainResponse(
+                success=True,
+                msg="训练完成",
+                model_info_id=plan.model_info_id,
+                best_path=str(best_path),
+                run_dir=str(run_dir),
+                best_val=best_val,
+                test_loss=test_loss,
+                train_params=plan.train_params,
+                plan_hash=plan.plan_hash,
+                status="succeeded",
             )
-
-        save_train_params(
-            save_dir,
-            request.EquipmentCode,
-            request.MeasCode,
-            model_type,
-            source,
-            freq,
-            days_back,
-            data_path,
-            merged_params,
-        )
-
-        best_path = result.get("best_path")
-
-        if status_updater:
-            try:
-                desc = _format_metrics_desc(
-                    result.get("best_val", "N/A"), result.get("test_loss", "N/A")
-                )
-
-                # 获取本地生成的图片路径
-                local_attachment_path = (result.get("plots") or {}).get("forecast")
-
-                # 调用上传接口，获取组装好的 JSON 字符串
-                db_attachments = None
-                if local_attachment_path:
-                    db_attachments = upload_forecast_image(local_attachment_path)
-
-                # 将包含 URL 的 JSON 字符串写入数据库的 attachments 字段
-                status_updater.mark_success(request.ModelInfoID, desc, attachments=db_attachments)
-            except Exception as e:
-                print(f"SQL Server 状态回写(成功)失败: {e}")
-
-        return TrainResponse(
-            success=True,
-            msg="训练完成",
-            model_info_id=request.ModelInfoID,
-            best_path=best_path,
-            run_dir=save_dir,
-            best_val=result.get("best_val"),
-            test_loss=result.get("test_loss"),
-            train_params=merged_params,
-        )
+    except TrainingPlanError as exc:
+        raise _http_plan_error(exc) from exc
     except HTTPException:
-        if status_updater and training_started:
-            try:
-                status_updater.mark_failed(request.ModelInfoID, "Training failed")
-            except Exception as e:
-                print(f"SQL Server 状态回写(失败)失败: {e}")
         raise
-    except Exception as e:
-        if status_updater and training_started:
+    except Exception as exc:
+        if run_dir is not None and training_started:
             try:
-                status_updater.mark_failed(request.ModelInfoID, f"Training failed: {e}")
-            except Exception as ex:
-                print(f"SQL Server 状态回写(失败)失败: {ex}")
-        raise HTTPException(status_code=500, detail=str(e))
+                manifest = read_manifest(run_dir) or {}
+                if manifest.get("status") not in {"failed", "succeeded"}:
+                    update_manifest(
+                        run_dir,
+                        status="failed",
+                        finished_at=datetime.now(UTC).isoformat(),
+                        error_code="TRAINING_FAILED",
+                    )
+            except Exception:
+                pass
+        raise HTTPException(status_code=500, detail="训练执行失败") from exc
 
 
 @router.post("/predict", response_model=APIResponse)
@@ -503,7 +507,10 @@ async def predict_transformer(request: PredictionRequest):
             cfg = _postgres_config_path()
         elif source == "csv":
             cfg = ""
-            data_path = _resolve_csv_path(data_path)
+            try:
+                data_path = _resolve_csv_path(data_path)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
         else:
             raise HTTPException(status_code=400, detail=f"不支持的数据源: {source}")
 
@@ -514,10 +521,23 @@ async def predict_transformer(request: PredictionRequest):
             raise HTTPException(status_code=400, detail="Autoformer 仅支持 CSV 数据源")
 
         if request.ModelInfoID:
-            run_dir = (
-                training_output_dir(request.EquipmentCode, request.MeasCode, model_type)
-                / request.ModelInfoID
-            )
+            try:
+                validate_model_info_id(request.ModelInfoID)
+                identity = TrainingPlan(
+                    equipment_code=request.EquipmentCode,
+                    meas_code=request.MeasCode,
+                    model_info_id=request.ModelInfoID,
+                    model_type=model_type,
+                    source=source,
+                    freq=freq,
+                    days_back=days_back,
+                    data_path=data_path,
+                    train_params={},
+                    execution_mode="local_only",
+                )
+                run_dir = resolve_safe_run_dir(identity)
+            except TrainingPlanError as exc:
+                raise _http_plan_error(exc) from exc
             ckpt_path = run_dir / checkpoint_filename(model_type)
             if not ckpt_path.exists():
                 raise HTTPException(
@@ -568,6 +588,81 @@ def list_models():
         return {"success": True, "msg": "获取模型列表成功", "models": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/train/status",
+    response_model=TrainStatusResponse,
+    summary="查询 ModelInfoID 对应的本地训练状态",
+)
+def get_training_status(
+    EquipmentCode: str,
+    MeasCode: str,
+    ModelInfoID: str,
+    ModelType: Optional[str] = None,
+):
+    try:
+        validate_model_info_id(ModelInfoID)
+        config = get_model_config(EquipmentCode, MeasCode)
+        if config is None:
+            raise TrainingPlanError(
+                f"未找到设备[{EquipmentCode}]参数[{MeasCode}]的模型配置",
+                status_code=404,
+                code="SCENARIO_NOT_FOUND",
+            )
+        model_type = str(ModelType or config.get("model_type", "informer")).strip().lower()
+        if model_type not in API_TRAIN_MODEL_TYPES:
+            raise TrainingPlanError(
+                f"不支持的模型类型: {model_type}", code="UNSUPPORTED_MODEL_TYPE"
+            )
+        identity = TrainingPlan(
+            equipment_code=EquipmentCode,
+            meas_code=MeasCode,
+            model_info_id=ModelInfoID,
+            model_type=model_type,
+            source="db",
+            freq="",
+            days_back=1,
+            data_path="",
+            train_params={},
+            execution_mode="local_only",
+        )
+        run_dir = resolve_safe_run_dir(identity)
+        if run_dir.is_symlink():
+            raise TrainingPlanError(
+                "训练状态目录无效", status_code=400, code="UNSAFE_OUTPUT_PATH"
+            )
+        manifest = read_manifest(run_dir)
+        if manifest is None:
+            raise TrainingPlanError(
+                "未找到该 ModelInfoID 的训练状态",
+                status_code=404,
+                code="TRAINING_STATUS_NOT_FOUND",
+            )
+        manifest = mark_interrupted_if_stale(run_dir, manifest)
+        status = manifest.get("status")
+        if status not in {"reserved", "running", "succeeded", "failed", "interrupted"}:
+            raise TrainingPlanError(
+                "训练状态文件无效", status_code=500, code="INVALID_MANIFEST"
+            )
+        return TrainStatusResponse(
+            success=True,
+            msg="获取训练状态成功",
+            model_info_id=ModelInfoID,
+            status=status,
+            created_at=manifest.get("created_at"),
+            started_at=manifest.get("started_at"),
+            finished_at=manifest.get("finished_at"),
+            best_val=finite_metric(manifest.get("best_val")),
+            test_loss=finite_metric(manifest.get("test_loss")),
+            error_code=manifest.get("error_code"),
+        )
+    except TrainingPlanError as exc:
+        raise _http_plan_error(exc) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="训练状态查询失败") from exc
 
 
 @router.post("/checkData", summary="校验训练数据量是否充足")
@@ -672,7 +767,9 @@ def check_training_data(request: DataCheckRequest):
     return {
         "code": 200,
         "msg": "校验成功" if usable else "数据量不足以支撑训练",
+        "usable": usable,
         "data": {
+            "Usable": usable,
             "RawDataVolume": quality["input_rows"],
             "TotalDataVolume": rows_after_resample,
             "EffectiveSampleCount": counts["windows"],

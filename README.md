@@ -91,6 +91,7 @@ uvicorn valeo_pdm.api.app:app --host 0.0.0.0 --port 8000
 - `VALEO_PDM_POSTGRES_CONFIG`：指定 PostgreSQL 配置 JSON 路径
 - `VALEO_PDM_SQLSERVER_CONFIG`：指定 SQL Server 状态更新配置 JSON 路径
 - `VALEO_PDM_ROOT`：显式指定项目根目录（通常不需要）
+- `VALEO_PDM_REQUIRE_TRAIN_PLAN_HASH`：设为 `1` 时，训练必须携带预览返回的计划哈希；默认 `0` 以兼容既有平台调用
 
 ## 快速使用
 
@@ -104,15 +105,25 @@ uvicorn valeo_pdm.api.app:app --host 0.0.0.0 --port 8000
 ### FastAPI
 
 - 启动：`valeo-pdm serve --host 0.0.0.0 --port 8000`
-- 训练接口：`POST /measPredict/transformer/train`，必填 `EquipmentCode/MeasCode/ModelInfoID/ParamArr`，可选 `ModelType`（`informer`/`testmodel`/`autoformer`），`ParamArr` 可覆盖训练参数。
-- 预测接口：`POST /measPredict/transformer/predict`，可选 `ModelInfoID`（为空用默认最新）、`ModelType`。
-- 模型列表：`GET /measPredict/transformer/models`
+- 训练预览：`POST /measPredict/train/preview`，返回最终生效参数和 `plan_hash`，不读取训练数据、不启动训练；数据检查由 `/checkData` 或 MCP 的 `pdm_prepare_training` 编排完成。
+- 训练接口：`POST /measPredict/train`，必填 `EquipmentCode/MeasCode/ModelInfoID/ParamArr/DataSource`；API 训练仅支持 `informer`/`autoformer`。
+- 训练状态：`GET /measPredict/train/status`
+- 预测接口：`POST /measPredict/predict`，可选 `ModelInfoID`（为空使用固定默认 checkpoint）、`ModelType`。
+- 模型列表：`GET /measPredict/models`
+- 数据检查：`POST /measPredict/checkData`
 - 健康检查：`GET /healthz`
+
+### Codex MCP Demo
+
+- MCP Server：`integrations/pdm_mcp`，使用独立 uv 环境，不加入算法项目依赖。
+- 训练 Skill：`.agents/skills/pdm-train-model`，固定执行“预览 → 用户下一轮确认 → 单次训练 → 状态/预测验证”。
+- 本地安全冒烟：`docker compose -f compose.mcp-smoke.yml up -d --build`，API 仅监听 `127.0.0.1:10022`，不挂载真实数据库配置。
+- 具体安装、工具契约和 Codex 注册命令见 `integrations/pdm_mcp/README.md`。
 
 ### 数据源
 
 - PostgreSQL（默认）：按 `configs/postgres_config.json` 里 SQL 查询拉取数据。
-- CSV：在 `configs/model_registry.yaml` 对应条目设置 `source: csv`、`data_path: <路径>`（相对项目根或绝对路径），格式需包含 `value` 列，最好有 `collect_time/collecttime/timestamp`。
+- CSV：在 `configs/model_registry.yaml` 对应条目设置 `source: csv`、`data_path: data/<文件>`。API/MCP 只接受 `data/` 下的相对路径，并拒绝 `..`、绝对路径和解析后越界的符号链接；格式需包含 `value` 列，最好有 `collect_time/collecttime/timestamp`。
 
 ### 训练状态回写（可选）
 
@@ -145,8 +156,8 @@ uvicorn valeo_pdm.api.app:app --host 0.0.0.0 --port 8000
    - CSV：设定 `source: csv`、`data_path`，CSV 至少有 `value` 列，建议有 `collect_time`（或 `collecttime/timestamp` 会被映射）。
 3) 运行：
    - CLI：`valeo-pdm train -e EQP-001 -m SENSOR_A`
-   - API：训练 `POST /measPredict/transformer/train`，传 `EquipmentCode/MeasCode/ModelInfoID`，可选 `ModelType` 覆盖
-   - 预测同理，`ModelInfoID` 不传则用默认最新
+   - API：训练 `POST /measPredict/train`，传 `EquipmentCode/MeasCode/ModelInfoID/ParamArr/DataSource`，可选 `ModelType` 覆盖
+   - 预测使用 `POST /measPredict/predict`；`ModelInfoID` 不传时使用固定默认 checkpoint
 
 ## 如何新增模型类型（自定义 model_type）
 
@@ -202,7 +213,9 @@ uvicorn valeo_pdm.api.app:app --host 0.0.0.0 --port 8000
     "MeasCode": "CCD-Score1",
     "ModelInfoID": "Run_001",
     "ModelType": "informer",
-    "ParamArr": [{ "FieldName": "epochs", "CurValue": 3 }]
+    "ParamArr": [{ "FieldName": "epochs", "CurValue": 3 }],
+    "DataSource": "postgres",
+    "ExecutionMode": "platform"
   }
   ```
 - API 预测 JSON 示例：

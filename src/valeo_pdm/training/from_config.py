@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import UTC, datetime
 import os
 from typing import Any
 
@@ -8,6 +9,13 @@ import yaml
 import math
 from valeo_pdm.paths import configs_dir, resolve_repo_path
 from valeo_pdm.training.registry import get_trainer
+from valeo_pdm.training.plan import TrainingPlan, validate_model_info_id
+from valeo_pdm.training.run_control import (
+    create_training_run,
+    finite_metric,
+    training_run_lock,
+    update_manifest,
+)
 from valeo_pdm.transformer.artifacts import training_output_dir
 from valeo_pdm.transformer.config import get_model_config, list_all_models
 from valeo_pdm.db.train_status import SqlServerTrainStatusUpdater, upload_forecast_image
@@ -112,14 +120,20 @@ def _format_metrics_desc(best_val: Any, test_loss: Any, std: float = 1.0) -> str
         return f"Training OK val={best_val} test={test_loss}"
 
 
-def train_from_config(
+def _train_from_config_impl(
     equipment_code: str,
     meas_code: str,
     model_info_id: str | None = None,
     sqlserver_config: str | None = None,
     model_type_override: str | None = None,
+    _save_dir_override: str | None = None,
+    _config_override: dict[str, Any] | None = None,
 ):
-    config = get_model_config(equipment_code, meas_code)
+    config = (
+        _config_override
+        if _config_override is not None
+        else get_model_config(equipment_code, meas_code)
+    )
     if not config:
         raise ValueError(f"未找到设备[{equipment_code}]参数[{meas_code}]的配置")
 
@@ -139,7 +153,9 @@ def train_from_config(
     else:
         db_config_path = None  # CSV 不需要数据库配置
     print(f"数据库配置: {'已选择' if db_config_path else '不适用'}")
-    save_dir = str(training_output_dir(equipment_code, meas_code, model_type).resolve())
+    save_dir = _save_dir_override or str(
+        training_output_dir(equipment_code, meas_code, model_type).resolve()
+    )
     status_updater = (
         _maybe_build_status_updater(sqlserver_config or _sqlserver_config_path())
         if model_info_id
@@ -434,6 +450,97 @@ def train_from_config(
             raise
 
     raise ValueError(f"不支持的模型类型: {model_type}")
+
+
+def train_from_config(
+    equipment_code: str,
+    meas_code: str,
+    model_info_id: str | None = None,
+    sqlserver_config: str | None = None,
+    model_type_override: str | None = None,
+):
+    """从配置训练；显式 ModelInfoID 使用与 API 相同的独占运行目录和文件锁。"""
+
+    if model_info_id is None:
+        return _train_from_config_impl(
+            equipment_code,
+            meas_code,
+            model_info_id,
+            sqlserver_config,
+            model_type_override,
+        )
+
+    validate_model_info_id(model_info_id)
+    config = get_model_config(equipment_code, meas_code)
+    if not config:
+        raise ValueError(f"未找到设备[{equipment_code}]参数[{meas_code}]的配置")
+    model_type = str(model_type_override or config.get("model_type", "informer")).lower()
+    identity = TrainingPlan(
+        equipment_code=equipment_code,
+        meas_code=meas_code,
+        model_info_id=model_info_id,
+        model_type=model_type,
+        source=str(config.get("source", "db")),
+        freq=str(config.get("freq", "15min")),
+        days_back=int(config.get("days_back", 365)),
+        data_path=str(config.get("data_path", "")),
+        train_params=dict(config.get("train_params", {}) or {}),
+        execution_mode="platform",
+    )
+    with training_run_lock(identity):
+        # 锁内重新解析模型类型；CLI 没有 preview hash，仍避免与 API/其他 CLI 并发覆盖。
+        current = get_model_config(equipment_code, meas_code)
+        if not current:
+            raise ValueError(f"未找到设备[{equipment_code}]参数[{meas_code}]的配置")
+        current_model_type = str(
+            model_type_override or current.get("model_type", "informer")
+        ).lower()
+        current_identity = TrainingPlan(
+            equipment_code=equipment_code,
+            meas_code=meas_code,
+            model_info_id=model_info_id,
+            model_type=current_model_type,
+            source=str(current.get("source", "db")),
+            freq=str(current.get("freq", "15min")),
+            days_back=int(current.get("days_back", 365)),
+            data_path=str(current.get("data_path", "")),
+            train_params=dict(current.get("train_params", {}) or {}),
+            execution_mode="platform",
+        )
+        run_dir = create_training_run(current_identity)
+        update_manifest(
+            run_dir,
+            status="running",
+            started_at=datetime.now(UTC).isoformat(),
+            pid=os.getpid(),
+        )
+        try:
+            result = _train_from_config_impl(
+                equipment_code,
+                meas_code,
+                model_info_id,
+                sqlserver_config,
+                current_model_type,
+                str(run_dir),
+                _config_override=current,
+            )
+        except Exception:
+            update_manifest(
+                run_dir,
+                status="failed",
+                finished_at=datetime.now(UTC).isoformat(),
+                error_code="TRAINING_FAILED",
+            )
+            raise
+        update_manifest(
+            run_dir,
+            status="succeeded",
+            finished_at=datetime.now(UTC).isoformat(),
+            best_val=finite_metric(result.get("best_val")),
+            test_loss=finite_metric(result.get("test_loss")),
+            error_code=None,
+        )
+        return result
 
 
 def list_available_configs():
