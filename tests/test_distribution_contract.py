@@ -3,11 +3,10 @@ from __future__ import annotations
 import json
 import re
 import shlex
+import subprocess
 import tomllib
 from typing import Any
 from pathlib import Path
-
-import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,7 +32,14 @@ def locked_package_names() -> set[str]:
 
 
 def compose_service() -> dict[str, Any]:
-    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
+    result = subprocess.run(
+        ["docker", "compose", "-f", str(ROOT / "docker-compose.yml"), "config", "--format", "json"],
+        cwd=ROOT,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    compose = json.loads(result.stdout)
     assert isinstance(compose, dict)
     services = compose.get("services")
     assert isinstance(services, dict)
