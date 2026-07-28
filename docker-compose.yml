@@ -8,13 +8,6 @@ services:
       # host_port:container_port
       - "127.0.0.1:${VALEO_PDM_HTTP_PORT:-10021}:10021"
     ipc: host
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [ gpu ]
     extra_hosts:
       # Linux server: make host reachable from container via host.docker.internal
       - "host.docker.internal:host-gateway"

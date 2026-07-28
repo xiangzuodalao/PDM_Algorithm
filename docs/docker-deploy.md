@@ -2,6 +2,8 @@
 
 本项目推荐以容器方式部署 FastAPI 服务，并通过挂载配置文件管理数据库连接与模型配置。
 
+默认 Docker 镜像使用仅 CPU 的 PyTorch，且不会请求 NVIDIA 设备。它保留训练与预测 API，但生产规模训练可能较慢。如需 GPU 镜像，必须使用独立的 Dockerfile/profile，并且只配置一个 CUDA/PyTorch 索引；不要向默认 lock 文件添加 CUDA 包。
+
 ## 0. 前置条件
 
 - 安装 Docker / Docker Compose

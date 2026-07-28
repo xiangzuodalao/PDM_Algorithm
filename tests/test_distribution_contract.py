@@ -83,3 +83,17 @@ def test_test_and_lint_tools_are_dev_dependencies() -> None:
     dev = {dependency_name(specifier) for specifier in config["dependency-groups"]["dev"]}
     assert {"pytest", "ruff"} <= dev
     assert not {"pytest", "ruff"}.intersection(runtime)
+
+
+def test_dockerfile_has_one_frozen_sync_and_no_second_torch_install() -> None:
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert dockerfile.count("uv sync") == 1
+    assert "uv sync --frozen --no-dev --python 3.12" in dockerfile
+    assert "uv pip install torch" not in dockerfile
+    assert '"--workers", "1"' in dockerfile
+
+
+def test_default_compose_does_not_request_gpu() -> None:
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    assert "driver: nvidia" not in compose
+    assert "capabilities: [ gpu ]" not in compose

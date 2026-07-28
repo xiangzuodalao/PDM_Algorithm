@@ -79,6 +79,8 @@ uvicorn valeo_pdm.api.app:app --host 0.0.0.0 --port 8000
 
 见 `docs/docker-deploy.md`。
 
+默认 Docker 镜像使用仅 CPU 的 PyTorch，不会请求 NVIDIA 设备；训练与预测 API 均保持可用，但生产规模训练可能较慢。如需 GPU 镜像，必须使用独立的 Dockerfile/profile，并且只配置一个 CUDA/PyTorch 索引；不要向默认 lock 文件添加 CUDA 包。
+
 ## 配置
 
 - `configs/model_registry.yaml`：设备/参数 -> 模型配置与训练超参数
