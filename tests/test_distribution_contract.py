@@ -14,6 +14,21 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
+EXPLICIT_FORBIDDEN_LOCK_PACKAGES = frozenset(
+    {
+        "debugpy",
+        "ipykernel",
+        "ipython",
+        "jupyter-client",
+        "jupyter-core",
+        "mlstm-kernels",
+        "torchvision",
+        "transformers",
+        "triton",
+        "xlstm",
+    }
+)
+
 
 def project_config() -> dict[str, object]:
     return tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
@@ -32,6 +47,13 @@ def runtime_dependency_specifiers() -> dict[str, str]:
 def locked_package_names() -> set[str]:
     lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
     return {dependency_name(package["name"]) for package in lock["package"]}
+
+
+def is_forbidden_locked_package(package_name: str) -> bool:
+    normalized_name = dependency_name(package_name)
+    return normalized_name in EXPLICIT_FORBIDDEN_LOCK_PACKAGES or normalized_name.startswith(
+        ("cuda-", "nvidia-")
+    )
 
 
 def compose_service() -> dict[str, Any]:
@@ -168,20 +190,33 @@ def test_runtime_dependencies_match_the_approved_cpu_contract() -> None:
 
 def test_locked_packages_exclude_gpu_and_optional_runtime_stacks() -> None:
     names = locked_package_names()
-    forbidden = {
-        "debugpy",
-        "ipykernel",
-        "ipython",
-        "jupyter-client",
-        "jupyter-core",
-        "mlstm-kernels",
-        "torchvision",
-        "transformers",
-        "triton",
-        "xlstm",
-    }
-    assert not names.intersection(forbidden)
-    assert not any(name.startswith("nvidia-") for name in names)
+    assert not {name for name in names if is_forbidden_locked_package(name)}
+
+
+@pytest.mark.parametrize(
+    ("package_name", "expected"),
+    [
+        ("cuda-runtime", True),
+        ("CUDA_runtime", True),
+        ("cuda.toolkit", True),
+        ("nvidia-cublas-cu12", True),
+        ("NVIDIA_cudnn_cu12", True),
+        ("debugpy", True),
+        ("ipykernel", True),
+        ("ipython", True),
+        ("jupyter_client", True),
+        ("jupyter.core", True),
+        ("mlstm_kernels", True),
+        ("torchvision", True),
+        ("transformers", True),
+        ("triton", True),
+        ("xlstm", True),
+        ("torch", False),
+        ("cudf", False),
+    ],
+)
+def test_forbidden_lock_package_name_normalization(package_name: str, expected: bool) -> None:
+    assert is_forbidden_locked_package(package_name) is expected
 
 
 def test_torch_uses_the_explicit_cpu_index() -> None:
@@ -209,6 +244,44 @@ def test_dockerfile_has_one_frozen_sync_and_no_second_torch_install() -> None:
     assert "uv sync --frozen --no-dev --python 3.12" in dockerfile
     assert "uv pip install torch" not in dockerfile
     assert '"--workers", "1"' in dockerfile
+
+
+def test_dockerfile_pins_external_images_to_proven_linux_amd64_digests() -> None:
+    instructions = dockerfile_instructions()
+    assert (
+        "FROM",
+        "docker.io/library/ubuntu@sha256:"
+        "4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90",
+    ) in instructions
+    assert any(
+        instruction == "COPY"
+        and value.startswith(
+            "--from=ghcr.io/astral-sh/uv@sha256:"
+            "df4cae8f3a96d175e2e5f992e597550000edbe78fdc2594d5cd8de1a217f504c "
+        )
+        for instruction, value in instructions
+    )
+
+
+def test_dockerfile_redirects_stderr_to_dev_null() -> None:
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert "2>dev/null" not in dockerfile
+
+
+def test_current_docs_use_locked_cpu_install_workflow() -> None:
+    current_docs = "\n".join(
+        (ROOT / path).read_text(encoding="utf-8") for path in ("README.md", "AGENTS.md")
+    )
+    forbidden_markers = (
+        "/whl/cu",
+        "pip install torch",
+        "pip install torchvision",
+        "pip install mlstm",
+        "pip install transformers",
+        "torchvision==",
+        "python3 -m pip install -e .",
+    )
+    assert not {marker for marker in forbidden_markers if marker in current_docs}
 
 
 def test_default_compose_does_not_request_gpu() -> None:

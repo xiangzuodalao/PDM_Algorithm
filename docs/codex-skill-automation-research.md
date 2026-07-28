@@ -1,5 +1,11 @@
 # Codex Skill 自动化需求调研
 
+> [!WARNING]
+> 本文是 2026-07-16 的历史研究快照，不是当前安装、依赖或部署说明。当前权威
+> 流程以 `README.md`、`docs/docker-deploy.md`、`pyproject.toml` 和 `uv.lock`
+> 为准：默认环境使用锁定的 CPU PyTorch，历史内容中的 CUDA/GPU、手工安装和
+> 旧架构描述仅用于保留研究背景。
+
 调研日期：2026-07-16
 调研范围：`IFactoryMom.PdM-Algorithm` 当前工作树
 调研方式：只读扫描仓库结构、源码、配置、文档、Docker、Git 跟踪文件和现有命令；未连接数据库、未训练模型、未构建镜像、未输出本地连接信息。

@@ -1,9 +1,8 @@
-# 使用官方轻量级 Python 镜像
-# FROM python:3.12-slim
-FROM ubuntu:24.04
+# 外部镜像摘要已在 Linux/amd64 本地构建中验证；其他架构需单独验证并更新摘要。
+FROM docker.io/library/ubuntu@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
 
 # 从官方镜像中直接复制已编译好的 uv 二进制文件
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv@sha256:df4cae8f3a96d175e2e5f992e597550000edbe78fdc2594d5cd8de1a217f504c /uv /uvx /bin/
 
 # 设置环境变量
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -18,10 +17,10 @@ WORKDIR /app
 RUN sed -i 's/deb.ubuntu.org/mirrors.tsinghua.com/g' /etc/apt/sources.list && \
     sed -i 's/security.ubuntu.org/mirrors.tsinghua.com/g' /etc/apt/sources.list && \
     apt-get update && \
-    (sed -i 's/deb.debian.org/mirrors.tsinghua.com/g' /etc/apt/sources.list.d/debian.sources 2>dev/null || true) && \
-    (sed -i 's/security.debian.org/mirrors.tsinghua.com/g' /etc/apt/sources.list.d/debian.sources 2>dev/null || true) && \
-    (sed -i 's/deb.debian.org/mirrors.tsinghua.com/g' /etc/apt/sources.list 2>dev/null || true) && \
-    (sed -i 's/security.debian.org/mirrors.tsinghua.com/g' /etc/apt/sources.list 2>dev/null || true) && \
+    (sed -i 's/deb.debian.org/mirrors.tsinghua.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true) && \
+    (sed -i 's/security.debian.org/mirrors.tsinghua.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true) && \
+    (sed -i 's/deb.debian.org/mirrors.tsinghua.com/g' /etc/apt/sources.list 2>/dev/null || true) && \
+    (sed -i 's/security.debian.org/mirrors.tsinghua.com/g' /etc/apt/sources.list 2>/dev/null || true) && \
     apt-get install -y --no-install-recommends \
     python3.12 \
     ca-certificates \
@@ -58,7 +57,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 
 # 创建非特权用户。代码与虚拟环境保持只读，仅预建运行时可写目录；
-# 避免递归 chown 复制整套 PyTorch/CUDA 环境形成巨大的镜像层。
+# 避免递归 chown 复制整套 PyTorch 环境形成巨大的镜像层。
 RUN useradd -m -u 10001 appuser \
     && install -d -o appuser -g appuser /app/artifacts /app/data
 

@@ -1,6 +1,6 @@
 # AGENTS.md
 
-> 本文件面向在本仓库中工作的 AI 编码 agent。完整用法见 `README.md`,深度架构调查见 `ARCHITECTURE_FINDINGS.md`。**本仓库正在被重构,以下以 2026-07-16 代码为准;动手前对关键结论自行复核。**
+> 本文件面向在本仓库中工作的 AI 编码 agent。完整用法见 `README.md`,深度架构调查见 `ARCHITECTURE_FINDINGS.md`。**本仓库正在被重构,以下以 2026-07-28 代码为准;动手前对关键结论自行复核。**
 
 ## 项目概述
 
@@ -15,12 +15,10 @@ API 启动链(`import valeo_pdm.api.app`)由 `tests/test_api_startup.py` 守护:
 ## 环境搭建(关键陷阱)
 
 - **Python >= 3.12**,包管理用 **uv**。
-- **torch 不在 `pyproject.toml` 依赖里**,需单独从 PyTorch 索引装,如:
-  ```bash
-  uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
-  ```
-  不要把 torch 加进 `pyproject.toml` dependencies(会破坏 `uv sync`)。
-- 安装项目:`uv venv --python 3.12 && uv pip install -e .`(先确保 torch 已装)。
+- **torch 是锁定的运行时依赖**，`pyproject.toml` 通过显式
+  `pytorch-cpu` 索引选择 CPU wheel；不要单独安装 Torch/torchvision 或混入 CUDA 包。
+- 安装/同步项目：`uv sync --frozen`。除非正在有意更新依赖锁，不要绕过
+  `uv.lock` 手工拼装环境。
 - **密钥配置 gitignore**:`configs/postgres_config.json`、`configs/sqlserver_config.json`、`configs/app_config.json` 只保留 `*.example.json` 模板,**勿提交真实连接串**;新增配置项同步更新 `.example.json`。
 - `artifacts/`、`data/` 同样 gitignore。
 
@@ -32,6 +30,7 @@ uv run valeo-pdm list-models                 # -l / ls / list
 uv run valeo-pdm train -e <设备> -m <参数>    # --all / --model-type / --model-info-id / --sqlserver-config
 uv run valeo-pdm serve --host 0.0.0.0 --port 8000 --reload
 uv run uvicorn valeo_pdm.api.app:app --port 8000
+# 默认 Compose 宿主端口是 127.0.0.1:10021；本地 CLI 默认端口仍为 8000
 
 # 测试(pyproject 默认 addopts 排除 integration_db)
 uv run pytest
@@ -92,7 +91,7 @@ tests/                    # pytest 套件 + conftest 网络隔离 + fixtures + i
 2. **配置三层合并**:`model_registry.yaml`(基线)← SQL Server 表 `mom_bas_ai_model_config`(整块覆盖)← API `ParamArr`(字段覆盖)。合并逻辑在 `transformer/config_resolution.py`,只有 `model_type/freq/days_back/source` 四个字段能从顶层 `defaults` 继承。
 3. **预测不可复现**:`predict.py:71` `np.random.normal` 残差注入,`predict.py` 无 `set_seed`,与训练侧 `set_seed(42)` 矛盾。需可复现时要处理。
 4. **训练管线仍重复**:`build_dataloaders/train_one_epoch/evaluate` 在 `train_informer.py` 与 `train_autoformer.py` 各一份;`set_seed` 三处重复;可视化重复。改一处注意同步另一处,或抽公共基类。
-5. **xlstm/timellm 注册但无实现**:`registry.py:13-14` 注册,`train_xlstm.py`/`time_llm/` 文件不存在,调用会 `ModuleNotFoundError`。`pyproject` 已装 `xlstm` 依赖但无训练代码。
+5. **xlstm/timellm 注册但无实现**:`registry.py:13-14` 注册,`train_xlstm.py`/`time_llm/` 文件不存在,调用会 `ModuleNotFoundError`。默认 CPU lock 已明确排除 `xlstm` 及相关可选栈。
 6. **Autoformer 仅支持 CSV**(`train_autoformer.py:135`)。
 7. **清洗不插值**:`clean_and_resample_timeseries` 只丢坏行 + 桶均值聚合;旧 `data_reader.py:preprocess_timeseries` 的线性插值未被调用。数据稀疏会直接丢窗口。
 8. **硬编码 SQL 表名**:`data_reader.py:92`(`mom_bas_ai_model_train_data`)、`config.py:118`(`mom_bas_ai_model_config`)、`train_status.py:118`。改表结构要改代码。

@@ -13,20 +13,16 @@
 
 ### 推荐：使用 `uv`
 
-1) 创建虚拟环境（Python 3.11/3.12 均可）：
+Python 3.12、运行时依赖及 CPU 版 PyTorch 均由 `uv.lock` 固定。按锁文件同步环境：
 
 ```bash
-uv venv --python 3.12
+uv sync --frozen
 ```
 
-2) 安装项目：
- - 准备工作：先注释掉`pyproject.toml`中的torch部分，然后执行以下命令
-```bash
-uv pip install -e .
-```
- - 去torch官网，复制命令进行安装，例如`uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130`
-<!-- uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128-->
-3) 运行命令：
+`pyproject.toml` 的显式 `pytorch-cpu` 索引会安装锁定的 CPU wheel；不要注释
+`torch`、另行安装 Torch/torchvision，或在此环境中混入 CUDA 包。
+
+同步完成后运行：
 
 ```bash
 uv run valeo-pdm list-models
@@ -36,12 +32,6 @@ uv run valeo-pdm serve --host 0.0.0.0 --port 8000
 ```
 
 如果不想每次都写 `uv run`，也可以激活环境后直接用 `valeo-pdm ...`。
-
-### 传统 pip（不推荐）
-
-```bash
-python3 -m pip install -e .
-```
 
 ## 训练
 
@@ -80,6 +70,11 @@ uvicorn valeo_pdm.api.app:app --host 0.0.0.0 --port 8000
 见 `docs/docker-deploy.md`。
 
 默认 Docker 镜像使用仅 CPU 的 PyTorch，不会请求 NVIDIA 设备；训练与预测 API 均保持可用，但生产规模训练可能较慢。如需 GPU 镜像，必须使用独立的 Dockerfile/profile，并且只配置一个 CUDA/PyTorch 索引；不要向默认 lock 文件添加 CUDA 包。
+
+默认 Compose 服务仅监听 `127.0.0.1:10021`。为兼容既有部署，
+`docker-compose.yml` 保留 `./src:/app/src` 源码挂载；运行时代码来自宿主机当前
+checkout，部署时应确保它与构建版本一致。Dockerfile 的外部镜像摘要已在
+Linux/amd64 本地构建中验证，其他架构需要单独验证。
 
 ## 配置
 
@@ -233,78 +228,3 @@ uvicorn valeo_pdm.api.app:app --host 0.0.0.0 --port 8000
 
 ## 提示
 - `testmodel` 是简化 GRU 示例，如需真实模型可按“新增模型类型”步骤替换。
-
-# docker 启动
-sudo groupadd docker
-sudo usermod -aG docker $USER
-docker compose down
-docker compose build
-docker compose up -d
-docker compose logs -f --tail=100 valeo-pdm-api
-
-torch==2.10.0
-torchvision==0.25.0+cu128
-
-
-# uv 
-uv pip install pipreqs
-pipreqs .   --encoding=utf8   --savepath temp_reqs.txt   --ignore .venv,.git,__pycache__,data,model,notebooks,.ipynb_checkpoints,artifacts   --use-local
-uv pip freeze > tmp_reqs.txt
-# 去除本项目循环依赖和torch
-uv add -r tmp_reqs.txt
-uv lock
-
-# 产物模型文件等权限问题
-sudo chown -R 10001:10001 ./artifacts ./data ./build ./docs
-
-
-# nginx 修改配置
-sudo docker compose exec nginx nginx -s reload
-
-# 配置文件修改完成后重启
-docker compose restart valeo-pdm-api
-
-<!-- 重建虚拟环境 -->
-deactivate
-rm -rf .venv
-UV_LINK_MODE=copy uv venv --python 3.12
-source .venv/bin/activate
-uv pip install -e . --index-url https://pypi.tuna.tsinghua.edu.cn/simple
-uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
-uv pip install requests  --index-url https://pypi.tuna.tsinghua.edu.cn/simple
-uv pip install setuptools  --index-url https://pypi.tuna.tsinghua.edu.cn/simple
-uv pip install mlstm_kernels  --index-url https://pypi.tuna.tsinghua.edu.cn/simple
-uv pip install transformers  --index-url https://pypi.tuna.tsinghua.edu.cn/simple
-
-# 安装 db driver 
-sudo su
-sed -i 's/deb.ubuntu.org/mirrors.tsinghua.com/g' /etc/apt/sources.list && \
-    sed -i 's/security.ubuntu.org/mirrors.tsinghua.com/g' /etc/apt/sources.list && \
-    apt-get update && \
-    (sed -i 's/deb.debian.org/mirrors.tsinghua.com/g' /etc/apt/sources.list.d/debian.sources 2>dev/null || true) && \
-    (sed -i 's/security.debian.org/mirrors.tsinghua.com/g' /etc/apt/sources.list.d/debian.sources 2>dev/null || true) && \
-    (sed -i 's/deb.debian.org/mirrors.tsinghua.com/g' /etc/apt/sources.list 2>dev/null || true) && \
-    (sed -i 's/security.debian.org/mirrors.tsinghua.com/g' /etc/apt/sources.list 2>dev/null || true) && \
-    apt-get install -y --no-install-recommends \
-    python3.12 \
-    ca-certificates \
-    unixodbc \
-    unixodbc-dev \
-    curl \
-    gnupg \
-    lsb-release \
-    && rm -rf /var/lib/apt/lists/*
-
-mkdir -p /usr/share/keyrings && \
-    curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /usr/share/keyrings/microsoft.gpg && \
-    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/ubuntu/24.04/prod $(lsb_release -cs) main" | \
-        tee /etc/apt/sources.list.d/mssql-release.list && \
-    apt-get update && \
-    ACCEPT_EULA=Y apt-get install -y msodbcsql18 mssql-tools18 && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
-
-apt-get update && apt-get install -y odbc-postgresql \
-    && apt-get clean
-
-<!-- 重建虚拟环境 end -->

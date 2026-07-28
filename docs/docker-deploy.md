@@ -4,6 +4,9 @@
 
 默认 Docker 镜像使用仅 CPU 的 PyTorch，且不会请求 NVIDIA 设备。它保留训练与预测 API，但生产规模训练可能较慢。如需 GPU 镜像，必须使用独立的 Dockerfile/profile，并且只配置一个 CUDA/PyTorch 索引；不要向默认 lock 文件添加 CUDA 包。
 
+Dockerfile 的 Ubuntu 与 uv 外部镜像摘要已在 Linux/amd64 本地构建中验证。
+这些摘要不代表其他架构也已验证；在其他架构部署前应单独验证并更新。
+
 ## 0. 前置条件
 
 - 安装 Docker / Docker Compose
@@ -35,7 +38,7 @@ docker compose up -d --build
 
 ```bash
 docker compose ps
-curl http://127.0.0.1:8000/healthz
+curl http://127.0.0.1:10021/healthz
 ```
 
 ## 3. 日志与停止
@@ -49,7 +52,11 @@ docker compose down
 
 - `VALEO_PDM_POSTGRES_CONFIG`：数据库连接配置 JSON 的路径（建议挂载到容器内再指向它）
 - `VALEO_PDM_MODEL_REGISTRY`：模型注册表 YAML 的路径（默认 `/app/configs/model_registry.yaml`）
-- `VALEO_PDM_HTTP_PORT`：对外暴露的 HTTP 端口（默认 8000），对应 `docker-compose.yml`
+- `VALEO_PDM_HTTP_PORT`：对外暴露的 HTTP 端口（默认 10021），对应 `docker-compose.yml`
+
+为兼容既有部署，Compose 保留 `./src:/app/src` 源码挂载。该挂载会让容器
+运行宿主机当前 checkout 中的源码，而不是镜像内复制的源码；部署时应确保
+checkout 与所构建版本一致。
 
 ### Linux 服务器 + DB 跑在宿主机（常见）
 
