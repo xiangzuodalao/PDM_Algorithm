@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import json
 import re
+import shlex
 import tomllib
+from typing import Any
 from pathlib import Path
+
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +30,55 @@ def runtime_dependency_specifiers() -> dict[str, str]:
 def locked_package_names() -> set[str]:
     lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
     return {dependency_name(package["name"]) for package in lock["package"]}
+
+
+def compose_service() -> dict[str, Any]:
+    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
+    assert isinstance(compose, dict)
+    services = compose.get("services")
+    assert isinstance(services, dict)
+    service = services.get("valeo-pdm-api")
+    assert isinstance(service, dict)
+    return service
+
+
+def nested_value_contains_gpu(value: object) -> bool:
+    if isinstance(value, str):
+        return value.casefold() == "gpu"
+    if isinstance(value, (list, tuple)):
+        return any(nested_value_contains_gpu(item) for item in value)
+    return False
+
+
+def dockerfile_instructions() -> list[tuple[str, str]]:
+    instructions: list[tuple[str, str]] = []
+    logical_line_parts: list[str] = []
+    for raw_line in (ROOT / "Dockerfile").read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        continues = line.endswith("\\")
+        logical_line_parts.append(line[:-1].rstrip() if continues else line)
+        if continues:
+            continue
+        instruction, separator, value = " ".join(logical_line_parts).partition(" ")
+        assert separator
+        instructions.append((instruction.upper(), value))
+        logical_line_parts = []
+    assert not logical_line_parts
+    return instructions
+
+
+def run_instructions() -> list[str]:
+    return [value for instruction, value in dockerfile_instructions() if instruction == "RUN"]
+
+
+def option_has_value(tokens: list[str], option: str, expected: str) -> bool:
+    return token_has_value(tokens, option, expected) or f"{option}={expected}" in tokens
+
+
+def token_has_value(tokens: list[str], option: str, expected: str) -> bool:
+    return any(token == option and next_token == expected for token, next_token in zip(tokens, tokens[1:]))
 
 
 def test_runtime_dependencies_match_the_approved_cpu_contract() -> None:
@@ -97,3 +151,59 @@ def test_default_compose_does_not_request_gpu() -> None:
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     assert "driver: nvidia" not in compose
     assert "capabilities: [ gpu ]" not in compose
+
+
+def test_default_compose_semantically_has_no_gpu_request() -> None:
+    service = compose_service()
+    assert "gpus" not in service
+    assert str(service.get("runtime", "")).casefold() != "nvidia"
+
+    deploy = service.get("deploy", {})
+    assert isinstance(deploy, dict)
+    resources = deploy.get("resources", {})
+    assert isinstance(resources, dict)
+    reservations = resources.get("reservations", {})
+    assert isinstance(reservations, dict)
+    devices = reservations.get("devices", [])
+    assert isinstance(devices, list)
+    for device in devices:
+        assert isinstance(device, dict)
+        assert str(device.get("driver", "")).casefold() != "nvidia"
+        assert not nested_value_contains_gpu(device.get("capabilities", []))
+
+
+def test_dockerfile_semantically_uses_cpu_only_runtime_contract() -> None:
+    run_values = run_instructions()
+    sync_runs = [
+        value
+        for value in run_values
+        if any(pair == ("uv", "sync") for pair in zip(shlex.split(value), shlex.split(value)[1:]))
+    ]
+    assert len(sync_runs) == 1
+    sync_tokens = shlex.split(sync_runs[0])
+    assert "--frozen" in sync_tokens
+    assert "--no-dev" in sync_tokens
+    assert option_has_value(sync_tokens, "--python", "3.12")
+
+    installer = re.compile(
+        r"\\b(?:uv\\s+pip|uv\\s+tool|pip(?:\\d+(?:\\.\\d+)*)?|python(?:\\d+(?:\\.\\d+)*)?\\s+-m\\s+pip|"
+        r"pipx|conda|mamba|poetry|apt(?:-get)?|apk|dnf|yum)\\s+(?:install|add)\\b",
+        re.IGNORECASE,
+    )
+    forbidden_package = re.compile(
+        r"\\b(?:torch(?:vision)?|triton|nvidia[\\w.-]*|cuda[\\w.-]*)\\b", re.IGNORECASE
+    )
+    cuda_index = re.compile(r"/whl/cu[\\w.-]*", re.IGNORECASE)
+    for value in run_values:
+        assert not cuda_index.search(value)
+        if installer.search(value):
+            assert not forbidden_package.search(value)
+
+    cmd_values = [value for instruction, value in dockerfile_instructions() if instruction == "CMD"]
+    assert len(cmd_values) == 1
+    command = json.loads(cmd_values[0])
+    assert isinstance(command, list)
+    worker_positions = [index for index, argument in enumerate(command) if argument == "--workers"]
+    assert len(worker_positions) == 1
+    assert worker_positions[0] < len(command) - 1
+    assert command[worker_positions[0] + 1] == "1"
