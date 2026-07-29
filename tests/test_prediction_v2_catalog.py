@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import os
 from pathlib import Path
 
 import pytest
@@ -137,18 +138,21 @@ def test_catalog_rejects_pt_before_reading_artifact_bytes(tmp_path: Path, monkey
     manifest = write_catalog(
         tmp_path, artifact_path="fixture.pt", digest=hashlib.sha256(ARTIFACT).hexdigest()
     )
-    original = Path.read_bytes
+    original = os.open
+    opened: list[str] = []
 
-    def reject_pt(path: Path) -> bytes:
-        if path.suffix == ".pt":
-            raise AssertionError("checkpoint bytes must never be read")
-        return original(path)
+    def reject_pt(path, flags, *args, **kwargs):
+        if path == "fixture.pt":
+            raise AssertionError("checkpoint bytes must never be opened")
+        opened.append(str(path))
+        return original(path, flags, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "read_bytes", reject_pt)
+    monkeypatch.setattr(os, "open", reject_pt)
     with pytest.raises(ValueError):
         module.ModelCatalog.from_manifest(
             manifest, object_root=tmp_path, allowed_tenant_ids={TENANT}
         )
+    assert "fixture.pt" not in opened
 
 
 def test_catalog_fixture_manifest_loads_and_allowlist_is_canonical(tmp_path: Path) -> None:
@@ -172,3 +176,40 @@ def test_catalog_fixture_manifest_loads_and_allowlist_is_canonical(tmp_path: Pat
             module.ModelCatalog.from_manifest(
                 fixtures / "manifest.yaml", object_root=tmp_path, allowed_tenant_ids={invalid}
             )
+
+
+def test_catalog_rejects_symlink_swap_at_descriptor_open(tmp_path: Path, monkeypatch) -> None:
+    """Checking a pathname before reading it would permit an artifact symlink race."""
+    module = require_module("valeo_pdm.prediction_v2.catalog", "v2 catalog-resolution")
+    outside = tmp_path.parent / "outside.json"
+    outside.write_bytes(b'{"secret":"outside-root"}')
+    manifest = write_catalog(tmp_path)
+    real_open = os.open
+    swapped = False
+
+    def swap_before_artifact_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if path == "fixture.json" and kwargs.get("dir_fd") is not None and not swapped:
+            swapped = True
+            (tmp_path / "fixture.json").unlink()
+            (tmp_path / "fixture.json").symlink_to(outside)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", swap_before_artifact_open)
+    with pytest.raises(ValueError):
+        module.ModelCatalog.from_manifest(
+            manifest, object_root=tmp_path, allowed_tenant_ids={TENANT}
+        )
+    assert swapped
+
+
+def test_catalog_rejects_fifo_without_opening_it(tmp_path: Path) -> None:
+    """Opening a FIFO as an artifact could block the prediction service indefinitely."""
+    module = require_module("valeo_pdm.prediction_v2.catalog", "v2 catalog-resolution")
+    manifest = write_catalog(tmp_path)
+    (tmp_path / "fixture.json").unlink()
+    os.mkfifo(tmp_path / "fixture.json")
+    with pytest.raises(ValueError):
+        module.ModelCatalog.from_manifest(
+            manifest, object_root=tmp_path, allowed_tenant_ids={TENANT}
+        )

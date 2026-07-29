@@ -43,12 +43,37 @@ from valeo_pdm.transformer.data import (
     validate_window_params,
     window_split_counts,
 )
-from valeo_pdm.transformer.predict import (
-    predict_autoformer_api,
-    predict_informer_api,
-    predict_testmodel_api,
-)
-from valeo_pdm.db.data_reader import load_sqlserver_timeseries, load_postgres_timeseries
+
+
+def predict_informer_api(*args, **kwargs):
+    from valeo_pdm.transformer.predict import predict_informer_api as implementation
+
+    return implementation(*args, **kwargs)
+
+
+def predict_testmodel_api(*args, **kwargs):
+    from valeo_pdm.transformer.predict import predict_testmodel_api as implementation
+
+    return implementation(*args, **kwargs)
+
+
+def predict_autoformer_api(*args, **kwargs):
+    from valeo_pdm.transformer.predict import predict_autoformer_api as implementation
+
+    return implementation(*args, **kwargs)
+
+
+def load_sqlserver_timeseries(*args, **kwargs):
+    from valeo_pdm.db.data_reader import load_sqlserver_timeseries as implementation
+
+    return implementation(*args, **kwargs)
+
+
+def load_postgres_timeseries(*args, **kwargs):
+    from valeo_pdm.db.data_reader import load_postgres_timeseries as implementation
+
+    return implementation(*args, **kwargs)
+
 
 MODEL_PREDICT_FUNCS = {
     "informer": predict_informer_api,

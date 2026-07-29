@@ -3,18 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import socket
-import sys
-import types
 from pathlib import Path
 
 import yaml
 import rfc8785
 import pytest
 from fastapi.testclient import TestClient
-
-
-# The production image supplies unixODBC; this isolated HTTP boundary test does not.
-sys.modules.setdefault("pyodbc", types.SimpleNamespace(connect=lambda *_args, **_kwargs: None))
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "prediction_v2"
