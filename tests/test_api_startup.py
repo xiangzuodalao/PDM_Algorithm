@@ -1,7 +1,13 @@
 import socket
+import sys
+import types
 
 import pytest
 from fastapi.testclient import TestClient
+
+
+# The startup contract must remain testable without the production unixODBC shared library.
+sys.modules.setdefault("pyodbc", types.SimpleNamespace(connect=lambda *_args, **_kwargs: None))
 
 
 _ORIGINAL_SOCKET_CONNECT = socket.socket.connect

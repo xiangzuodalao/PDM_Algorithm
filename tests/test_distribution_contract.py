@@ -180,6 +180,7 @@ def test_runtime_dependencies_match_the_approved_cpu_contract() -> None:
         "pyodbc": "pyodbc==5.3.0",
         "pyyaml": "pyyaml==6.0.3",
         "requests": "requests==2.32.5",
+        "rfc8785": "rfc8785==0.1.4",
         "starlette": "starlette==0.50.0",
         "torch": "torch==2.10.0",
         "tqdm": "tqdm==4.67.1",

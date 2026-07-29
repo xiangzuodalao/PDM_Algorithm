@@ -510,7 +510,7 @@ async def predict_transformer(request: PredictionRequest):
             try:
                 data_path = _resolve_csv_path(data_path)
             except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
+                raise HTTPException(status_code=400, detail="UNSAFE_DATA_PATH") from exc
         else:
             raise HTTPException(status_code=400, detail=f"不支持的数据源: {source}")
 
@@ -542,14 +542,14 @@ async def predict_transformer(request: PredictionRequest):
             if not ckpt_path.exists():
                 raise HTTPException(
                     status_code=404,
-                    detail=f"未找到模型文件: {ckpt_path}. 请确认 ModelInfoID 是否正确。",
+                    detail="MODEL_FILE_NOT_FOUND",
                 )
         else:
             ckpt_path = resolve_checkpoint_path(request.EquipmentCode, request.MeasCode, model_type)
             if not ckpt_path.exists():
                 raise HTTPException(
                     status_code=404,
-                    detail=f"未找到默认模型文件: {ckpt_path}.",
+                    detail="MODEL_FILE_NOT_FOUND",
                 )
         resp = await asyncio.to_thread(
             predict_func,
@@ -565,8 +565,8 @@ async def predict_transformer(request: PredictionRequest):
         return APIResponse(**resp)
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="PREDICTION_FAILED") from exc
 
 
 @router.get("/models", summary="列出所有已注册的模型配置")
@@ -629,9 +629,7 @@ def get_training_status(
         )
         run_dir = resolve_safe_run_dir(identity)
         if run_dir.is_symlink():
-            raise TrainingPlanError(
-                "训练状态目录无效", status_code=400, code="UNSAFE_OUTPUT_PATH"
-            )
+            raise TrainingPlanError("训练状态目录无效", status_code=400, code="UNSAFE_OUTPUT_PATH")
         manifest = read_manifest(run_dir)
         if manifest is None:
             raise TrainingPlanError(
@@ -642,9 +640,7 @@ def get_training_status(
         manifest = mark_interrupted_if_stale(run_dir, manifest)
         status = manifest.get("status")
         if status not in {"reserved", "running", "succeeded", "failed", "interrupted"}:
-            raise TrainingPlanError(
-                "训练状态文件无效", status_code=500, code="INVALID_MANIFEST"
-            )
+            raise TrainingPlanError("训练状态文件无效", status_code=500, code="INVALID_MANIFEST")
         return TrainStatusResponse(
             success=True,
             msg="获取训练状态成功",
