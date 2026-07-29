@@ -28,9 +28,9 @@ def canonical_decimal(value: str, *, scale: int) -> str:
         raise ValueError("decimal string must be finite and non-exponent")
     try:
         decimal = Decimal(value)
+        quantized = decimal.quantize(Decimal(1).scaleb(-scale), rounding=ROUND_HALF_EVEN)
     except InvalidOperation as exc:
         raise ValueError("invalid decimal") from exc
-    quantized = decimal.quantize(Decimal(1).scaleb(-scale), rounding=ROUND_HALF_EVEN)
     if quantized == 0:
         quantized = abs(quantized)
     return f"{quantized:.{scale}f}"
@@ -82,6 +82,27 @@ def request_projection(request: PredictionRequestV2) -> dict[str, Any]:
 
 def calculate_request_digest(request: PredictionRequestV2) -> str:
     return _digest(request_projection(request))
+
+
+def canonicalize_request(
+    request: PredictionRequestV2, profile: ModelProfile
+) -> PredictionRequestV2:
+    """Normalize replay identity fields before its request digest is verified."""
+    unit = canonical_unit(request.unit)
+    if unit != canonical_unit(profile.unit):
+        raise ValueError("unit mismatch")
+    history = [
+        point.model_copy(
+            update={
+                "value": canonical_decimal(point.value, scale=profile.value_scale),
+                "unit": canonical_unit(point.unit),
+            }
+        )
+        for point in request.history
+    ]
+    if any(point.unit != unit for point in history):
+        raise ValueError("unit mismatch")
+    return request.model_copy(update={"unit": unit, "history": history})
 
 
 def normalize_history(

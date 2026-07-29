@@ -76,6 +76,14 @@ def test_catalog_requires_exact_tenant_profile_model_and_measurement(tmp_path: P
         catalog(tmp_path).resolve(TENANT, "pilot-cnc-vibration", "wrong", "vibration_rms")
     with pytest.raises(LookupError):
         catalog(tmp_path).resolve(
+            TENANT, "wrong-profile", "pilot-fixture-v1-cnc-vibration", "vibration_rms"
+        )
+    with pytest.raises(LookupError):
+        catalog(tmp_path).resolve(
+            TENANT, "pilot-cnc-vibration", "pilot-fixture-v1-cnc-vibration", "wrong-meas"
+        )
+    with pytest.raises(LookupError):
+        catalog(tmp_path).resolve(
             "00000000-0000-4000-8000-000000000002",
             "pilot-cnc-vibration",
             "pilot-fixture-v1-cnc-vibration",
@@ -120,3 +128,47 @@ def test_catalog_fails_closed_for_duplicate_missing_hash_and_escaping_symlink(
     (escape / "fixture.json").symlink_to(Path("/etc/passwd"))
     with pytest.raises(ValueError):
         module.ModelCatalog.from_manifest(manifest, object_root=escape, allowed_tenant_ids={TENANT})
+
+
+def test_catalog_rejects_pt_before_reading_artifact_bytes(tmp_path: Path, monkeypatch) -> None:
+    """Allowing a hash-valid checkpoint would reintroduce model artifact loading into v2."""
+    module = require_module("valeo_pdm.prediction_v2.catalog", "v2 catalog-resolution")
+    (tmp_path / "fixture.pt").write_bytes(ARTIFACT)
+    manifest = write_catalog(
+        tmp_path, artifact_path="fixture.pt", digest=hashlib.sha256(ARTIFACT).hexdigest()
+    )
+    original = Path.read_bytes
+
+    def reject_pt(path: Path) -> bytes:
+        if path.suffix == ".pt":
+            raise AssertionError("checkpoint bytes must never be read")
+        return original(path)
+
+    monkeypatch.setattr(Path, "read_bytes", reject_pt)
+    with pytest.raises(ValueError):
+        module.ModelCatalog.from_manifest(
+            manifest, object_root=tmp_path, allowed_tenant_ids={TENANT}
+        )
+
+
+def test_catalog_fixture_manifest_loads_and_allowlist_is_canonical(tmp_path: Path) -> None:
+    """A standalone fixture or permissive tenant parser would weaken independent delivery."""
+    module = require_module("valeo_pdm.prediction_v2.catalog", "v2 catalog-resolution")
+    fixtures = Path(__file__).parent / "fixtures" / "prediction_v2"
+    (tmp_path / "fixture.json").write_bytes((fixtures / "fixture.json").read_bytes())
+    catalog = module.ModelCatalog.from_manifest(
+        fixtures / "manifest.yaml", object_root=tmp_path, allowed_tenant_ids={TENANT}
+    )
+    assert catalog.resolve(
+        TENANT, "pilot-cnc-vibration", "pilot-fixture-v1-cnc-vibration", "vibration_rms"
+    )
+    for invalid in (
+        "",
+        "00000000-0000-4000-8000-00000000000A",
+        TENANT.replace("-", ""),
+        "{" + TENANT + "}",
+    ):
+        with pytest.raises(ValueError):
+            module.ModelCatalog.from_manifest(
+                fixtures / "manifest.yaml", object_root=tmp_path, allowed_tenant_ids={invalid}
+            )

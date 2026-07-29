@@ -5,7 +5,11 @@ from datetime import UTC, datetime
 
 from valeo_pdm.prediction_v2.catalog import ModelCatalog
 from valeo_pdm.prediction_v2.models import PredictionRequestV2, PredictionResponseV2
-from valeo_pdm.prediction_v2.normalization import calculate_request_digest, normalize_history
+from valeo_pdm.prediction_v2.normalization import (
+    calculate_request_digest,
+    canonicalize_request,
+    normalize_history,
+)
 from valeo_pdm.prediction_v2.predictors import RepeatLastFixturePredictor
 
 
@@ -21,20 +25,21 @@ class PredictionV2Service:
         self._predictor = predictor or RepeatLastFixturePredictor()
 
     def predict(self, request: PredictionRequestV2, *, now: datetime) -> PredictionResponseV2:
-        expected = calculate_request_digest(request)
-        if not hmac.compare_digest(expected, request.request_digest):
-            raise RequestDigestMismatch("request digest does not match")
         resolved = self._catalog.resolve(
             request.tenant_id, request.model_profile_id, request.model_info_id, request.meas_code
         )
+        canonical_request = canonicalize_request(request, resolved.profile)
+        expected = calculate_request_digest(canonical_request)
+        if not hmac.compare_digest(expected, request.request_digest):
+            raise RequestDigestMismatch("request digest does not match")
         if now.tzinfo is None:
             raise ValueError("now must be timezone-aware")
         now_ms = int(now.astimezone(UTC).timestamp() * 1000)
-        normalized = normalize_history(request, resolved.profile, now_ms=now_ms)
+        normalized = normalize_history(canonical_request, resolved.profile, now_ms=now_ms)
         forecast = self._predictor.predict(normalized, resolved.profile)
         return PredictionResponseV2(
-            correlation_id=request.correlation_id,
-            equipment_id=request.equipment_id,
+            correlation_id=canonical_request.correlation_id,
+            equipment_id=canonical_request.equipment_id,
             model_profile_id=resolved.profile.model_profile_id,
             model_info_id=resolved.profile.model_info_id,
             model_artifact_sha256=resolved.artifact_sha256,

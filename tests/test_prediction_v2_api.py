@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import socket
 import sys
 import types
 from pathlib import Path
@@ -16,7 +17,7 @@ from fastapi.testclient import TestClient
 sys.modules.setdefault("pyodbc", types.SimpleNamespace(connect=lambda *_args, **_kwargs: None))
 
 
-ROOT = Path(__file__).resolve().parents[3]
+FIXTURES = Path(__file__).parent / "fixtures" / "prediction_v2"
 TOKEN = "opaque-pdm-v2-token"
 ARTIFACT = (
     b'{"kind":"repeat-last","model_info_id":"pilot-fixture-v1-cnc-vibration",'
@@ -26,9 +27,7 @@ ARTIFACT = (
 
 
 def payload() -> dict:
-    return json.loads(
-        (ROOT / "tests/contract/phase1/fixtures/pdm-prediction-request.json").read_text()
-    )
+    return json.loads((FIXTURES / "request.json").read_text(encoding="utf-8"))
 
 
 def request_digest(body: dict) -> str:
@@ -80,9 +79,7 @@ def configure_runtime(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("VALEO_PDM_PREDICTION_V2_BEARER_TOKEN", TOKEN)
     monkeypatch.setenv("VALEO_PDM_PREDICTION_V2_MANIFEST", str(manifest))
     monkeypatch.setenv("VALEO_PDM_PREDICTION_V2_OBJECT_ROOT", str(tmp_path))
-    monkeypatch.setenv(
-        "VALEO_PDM_PREDICTION_V2_ALLOWED_TENANT_IDS", "00000000-0000-4000-8000-000000000001"
-    )
+    monkeypatch.setenv("VALEO_PDM_ALLOWED_TENANT_IDS", "00000000-0000-4000-8000-000000000001")
 
 
 def post(client: TestClient, body: dict, token: str = TOKEN):
@@ -104,6 +101,30 @@ def test_prediction_v2_valid_contract_request_returns_exact_forecast(
         "get_model_config",
         lambda *_args: (_ for _ in ()).throw(AssertionError("legacy config accessed")),
     )
+    for name in (
+        "get_trainer",
+        "load_timeseries_file",
+        "load_postgres_timeseries",
+        "load_sqlserver_timeseries",
+    ):
+        monkeypatch.setattr(
+            router,
+            name,
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy access")),
+        )
+    monkeypatch.setattr(
+        socket,
+        "create_connection",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("network access")),
+    )
+    original_read_bytes = Path.read_bytes
+
+    def reject_checkpoint(path: Path) -> bytes:
+        if path.suffix == ".pt":
+            raise AssertionError("checkpoint access")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", reject_checkpoint)
 
     with TestClient(app) as client:
         response = post(client, payload())
@@ -123,6 +144,20 @@ def test_prediction_v2_valid_contract_request_returns_exact_forecast(
     }
     assert len(body["forecast"]) == 15
     assert "risk" not in body and "recommendation" not in body
+
+
+def test_v2_ignores_legacy_allowlist_environment_name(monkeypatch, tmp_path: Path) -> None:
+    """The retired allowlist variable must not accidentally authorize a tenant."""
+    configure_runtime(monkeypatch, tmp_path)
+    monkeypatch.delenv("VALEO_PDM_ALLOWED_TENANT_IDS")
+    monkeypatch.setenv(
+        "VALEO_PDM_PREDICTION_V2_ALLOWED_TENANT_IDS", "00000000-0000-4000-8000-000000000001"
+    )
+    from valeo_pdm.api.app import app
+
+    with TestClient(app) as client:
+        response = post(client, payload())
+    assert response.status_code == 503
 
 
 @pytest.mark.parametrize(
@@ -202,6 +237,33 @@ def test_v2_validation_digest_and_unknown_model_use_stable_root_errors(
     }
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("tenant_id", "00000000-0000-4000-8000-000000000002"),
+        ("model_profile_id", "wrong-profile"),
+        ("meas_code", "wrong-meas"),
+    ],
+)
+def test_v2_unknown_exact_identity_boundaries_are_model_not_found(
+    monkeypatch, tmp_path: Path, field: str, value: str
+) -> None:
+    """Relaxing any catalog identity component would select a wrong model fixture."""
+    configure_runtime(monkeypatch, tmp_path)
+    from valeo_pdm.api.app import app
+
+    body = payload()
+    body[field] = value
+    body["request_digest"] = request_digest(body)
+    with TestClient(app) as client:
+        response = post(client, body)
+    assert response.status_code == 404
+    assert response.json() == {
+        "code": "MODEL_NOT_FOUND",
+        "message": "Requested model is unavailable.",
+    }
+
+
 def test_v2_unconfigured_catalog_is_safe_503_after_authentication(monkeypatch) -> None:
     """Treating absent runtime catalog as a model miss would hide an unsafe provider state."""
     monkeypatch.setenv("VALEO_PDM_PREDICTION_V2_BEARER_TOKEN", TOKEN)
@@ -217,6 +279,30 @@ def test_v2_unconfigured_catalog_is_safe_503_after_authentication(monkeypatch) -
         "message": "Prediction catalog is not ready.",
     }
     assert health.status_code == 200
+
+
+def test_v2_service_failure_never_leaks_path_or_secret(monkeypatch, tmp_path: Path) -> None:
+    """Leaking dependency exceptions would expose internal prediction runtime details."""
+    configure_runtime(monkeypatch, tmp_path)
+    from valeo_pdm.api.app import app
+    from valeo_pdm.api.prediction_v2 import get_prediction_service
+
+    class ExplodingService:
+        def predict(self, *_args, **_kwargs):
+            raise RuntimeError("secret token at /private/v2/model.json")
+
+    app.dependency_overrides[get_prediction_service] = lambda: ExplodingService()
+    try:
+        with TestClient(app) as client:
+            response = post(client, payload())
+    finally:
+        app.dependency_overrides.pop(get_prediction_service, None)
+    assert response.status_code == 500
+    assert response.json() == {
+        "code": "PREDICTION_FAILED",
+        "message": "Prediction could not be completed.",
+    }
+    assert "/private/v2/model.json" not in response.text and "secret token" not in response.text
 
 
 def test_legacy_predict_failure_does_not_leak_absolute_path_or_exception(monkeypatch) -> None:

@@ -8,7 +8,7 @@ from uuid import UUID
 
 import yaml
 
-from valeo_pdm.prediction_v2.models import ModelProfile
+from valeo_pdm.prediction_v2.models import CANONICAL_UUID_RE, ModelProfile
 
 
 @dataclass(frozen=True)
@@ -32,7 +32,12 @@ class ModelCatalog:
         object_root: Path,
         allowed_tenant_ids: Iterable[str],
     ) -> ModelCatalog:
-        root = object_root.resolve(strict=True)
+        try:
+            root = object_root.resolve(strict=True)
+        except OSError as exc:
+            raise ValueError("prediction object root is unavailable") from exc
+        if not root.is_dir():
+            raise ValueError("prediction object root must be a directory")
         raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
         entries = raw.get("entries") if isinstance(raw, dict) else None
         if not isinstance(entries, list) or not entries:
@@ -76,10 +81,13 @@ class ModelCatalog:
             ):
                 raise ValueError("artifact path must be relative")
             relative = Path(artifact_path)
-            if ".." in relative.parts:
-                raise ValueError("artifact path escapes object root")
+            if ".." in relative.parts or relative.suffix != ".json":
+                raise ValueError("artifact must be a relative JSON fixture")
+            candidate = root / relative
+            if candidate.is_symlink():
+                raise ValueError("artifact path must be an ordinary file")
             try:
-                artifact = (root / relative).resolve(strict=True)
+                artifact = candidate.resolve(strict=True)
             except OSError as exc:
                 raise ValueError("prediction artifact is missing") from exc
             if not artifact.is_file() or not artifact.is_relative_to(root):
@@ -91,7 +99,11 @@ class ModelCatalog:
             if identity in resolved:
                 raise ValueError("duplicate prediction model identity")
             resolved[identity] = ResolvedModel(profile=profile, artifact_sha256=actual_hash)
-        allowed = {str(UUID(tenant)) for tenant in allowed_tenant_ids}
+        allowed: set[str] = set()
+        for tenant in allowed_tenant_ids:
+            if type(tenant) is not str or CANONICAL_UUID_RE.fullmatch(tenant) is None:
+                raise ValueError("tenant allowlist requires canonical UUIDs")
+            allowed.add(str(UUID(tenant)))
         return cls(resolved, allowed)
 
     def resolve(

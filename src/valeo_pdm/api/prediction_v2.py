@@ -31,7 +31,7 @@ def get_prediction_service() -> PredictionV2Service:
     object_root_value = os.getenv("VALEO_PDM_PREDICTION_V2_OBJECT_ROOT")
     if not manifest_value or not object_root_value:
         raise _error(503, "PREDICTION_CATALOG_NOT_READY", "Prediction catalog is not ready.")
-    tenant_ids = os.getenv("VALEO_PDM_PREDICTION_V2_ALLOWED_TENANT_IDS", "").split(",")
+    tenant_ids = os.getenv("VALEO_PDM_ALLOWED_TENANT_IDS", "").split(",")
     try:
         catalog = ModelCatalog.from_manifest(
             Path(manifest_value), object_root=Path(object_root_value), allowed_tenant_ids=tenant_ids
