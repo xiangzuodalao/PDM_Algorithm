@@ -249,9 +249,7 @@ def test_local_only_train_uses_confirmed_hash_and_status_manifest(
     assert body["status"] == "succeeded"
     assert len(calls) == 1
     assert calls[0]["epochs"] == 2
-    run_dir = (
-        root / "artifacts" / "checkpoints" / "exp_EQ-1_MEAS-1_informer" / "mcp-train-1"
-    )
+    run_dir = root / "artifacts" / "checkpoints" / "exp_EQ-1_MEAS-1_informer" / "mcp-train-1"
     manifest = json.loads((run_dir / "training_manifest.json").read_text(encoding="utf-8"))
     assert manifest["status"] == "succeeded"
     assert manifest["best_val"] == 0.25
@@ -289,11 +287,7 @@ def test_hash_drift_and_required_hash_fail_before_creating_run_dir(
     required = client.post("/measPredict/train", json=_request("hash-required-1"))
     assert required.status_code == 428
     assert not (
-        root
-        / "artifacts"
-        / "checkpoints"
-        / "exp_EQ-1_MEAS-1_informer"
-        / "hash-required-1"
+        root / "artifacts" / "checkpoints" / "exp_EQ-1_MEAS-1_informer" / "hash-required-1"
     ).exists()
 
 
@@ -319,11 +313,7 @@ def test_hash_is_rechecked_under_lock_before_directory_creation(
     assert response.status_code == 409
     assert calls == 2
     assert not (
-        root
-        / "artifacts"
-        / "checkpoints"
-        / "exp_EQ-1_MEAS-1_informer"
-        / "locked-hash-1"
+        root / "artifacts" / "checkpoints" / "exp_EQ-1_MEAS-1_informer" / "locked-hash-1"
     ).exists()
 
 
@@ -337,9 +327,9 @@ def test_failed_training_is_manifested_without_leaking_internal_error(
 
     monkeypatch.setattr(api_router, "get_trainer", lambda _model_type: fail_trainer)
     payload = _request("failed-1")
-    payload["ExpectedPlanHash"] = client.post(
-        "/measPredict/train/preview", json=payload
-    ).json()["plan_hash"]
+    payload["ExpectedPlanHash"] = client.post("/measPredict/train/preview", json=payload).json()[
+        "plan_hash"
+    ]
     response = client.post("/measPredict/train", json=payload)
     assert response.status_code == 500
     assert response.json()["detail"] == "训练执行失败"
@@ -368,9 +358,9 @@ def test_missing_checkpoint_marks_training_failed(
         lambda _model_type: lambda **_kwargs: {"best_val": 0.1, "test_loss": 0.2},
     )
     payload = _request("missing-checkpoint-1")
-    payload["ExpectedPlanHash"] = client.post(
-        "/measPredict/train/preview", json=payload
-    ).json()["plan_hash"]
+    payload["ExpectedPlanHash"] = client.post("/measPredict/train/preview", json=payload).json()[
+        "plan_hash"
+    ]
     response = client.post("/measPredict/train", json=payload)
     assert response.status_code == 500
     status = client.get(
@@ -475,9 +465,9 @@ def test_autoformer_training_keeps_model_specific_arguments(
     monkeypatch.setattr(api_router, "get_trainer", lambda _model_type: trainer)
     payload = _request("autoformer-1", source="csv")
     payload["ModelType"] = "autoformer"
-    payload["ExpectedPlanHash"] = client.post(
-        "/measPredict/train/preview", json=payload
-    ).json()["plan_hash"]
+    payload["ExpectedPlanHash"] = client.post("/measPredict/train/preview", json=payload).json()[
+        "plan_hash"
+    ]
     response = client.post("/measPredict/train", json=payload)
     assert response.status_code == 200
     assert captured["source"] == "csv"
@@ -508,7 +498,9 @@ def test_check_data_exposes_usable_in_both_compatibility_locations(
         "aggregated_rows": 20,
         "rows_after_resample": 20,
     }
-    monkeypatch.setattr(api_router, "load_timeseries_file", lambda *_a, **_k: (list(range(20)), quality))
+    monkeypatch.setattr(
+        api_router, "load_timeseries_file", lambda *_a, **_k: (list(range(20)), quality)
+    )
     response = client.post(
         "/measPredict/checkData",
         json={
@@ -654,9 +646,7 @@ def test_reused_pid_with_new_process_identity_becomes_interrupted(
     )
     with training_run_lock(plan):
         run_dir = create_training_run(plan)
-    manifest = update_manifest(
-        run_dir, status="running", pid=42, process_identity="old-boot:100"
-    )
+    manifest = update_manifest(run_dir, status="running", pid=42, process_identity="old-boot:100")
     monkeypatch.setattr(run_control, "_process_identity", lambda _pid: "new-boot:200")
     refreshed = mark_interrupted_if_stale(run_dir, manifest)
     assert refreshed["status"] == "interrupted"

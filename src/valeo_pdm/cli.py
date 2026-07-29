@@ -16,27 +16,50 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawTextHelpFormatter,
     )
     # 顶层快捷开关：无需记忆子命令
-    parser.add_argument("--list-models", "--list", "-l", action="store_true", dest="list_models", help="列出已注册的训练/推理配置")
-    parser.add_argument("--serve", "-s", action="store_true", dest="serve_flag", help="启动 FastAPI 服务（等价于子命令 serve）")
-    parser.add_argument("--host", type=str, default=os.getenv("HOST", "0.0.0.0"), help="serve 时绑定的 host")
-    parser.add_argument("--port", type=int, default=int(os.getenv("PORT", "8000")), help="serve 时绑定的端口")
+    parser.add_argument(
+        "--list-models",
+        "--list",
+        "-l",
+        action="store_true",
+        dest="list_models",
+        help="列出已注册的训练/推理配置",
+    )
+    parser.add_argument(
+        "--serve",
+        "-s",
+        action="store_true",
+        dest="serve_flag",
+        help="启动 FastAPI 服务（等价于子命令 serve）",
+    )
+    parser.add_argument(
+        "--host", type=str, default=os.getenv("HOST", "0.0.0.0"), help="serve 时绑定的 host"
+    )
+    parser.add_argument(
+        "--port", type=int, default=int(os.getenv("PORT", "8000")), help="serve 时绑定的端口"
+    )
     parser.add_argument("--reload", action="store_true", help="serve 时启用热重载")
 
     sub = parser.add_subparsers(dest="cmd", required=False)
 
-    sub.add_parser("list-models", aliases=["ls", "list"], help="列出已注册的训练/推理配置").set_defaults(cmd="list-models")
+    sub.add_parser(
+        "list-models", aliases=["ls", "list"], help="列出已注册的训练/推理配置"
+    ).set_defaults(cmd="list-models")
 
     p_train = sub.add_parser("train", help="从配置训练模型")
     p_train.add_argument("--equipment", "-e", type=str, help="设备编码")
     p_train.add_argument("--meas", "-m", type=str, help="参数编码")
     p_train.add_argument("--all", "-a", action="store_true", help="训练所有已配置模型")
-    p_train.add_argument("--model-info-id", type=str, help="写训练状态到 SQL Server 时使用的 ModelInfoId")
+    p_train.add_argument(
+        "--model-info-id", type=str, help="写训练状态到 SQL Server 时使用的 ModelInfoId"
+    )
     p_train.add_argument(
         "--sqlserver-config",
         type=str,
         help="SQL Server 状态更新配置 JSON 路径（默认 configs/sqlserver_config.json 或环境变量 VALEO_PDM_SQLSERVER_CONFIG）",
     )
-    p_train.add_argument("--model-type", type=str, help="可选，覆盖配置中的模型类型（例如 testmodel）")
+    p_train.add_argument(
+        "--model-type", type=str, help="可选，覆盖配置中的模型类型（例如 testmodel）"
+    )
     p_train.set_defaults(cmd="train")
 
     p_serve = sub.add_parser("serve", aliases=["s"], help="启动 FastAPI 服务")
@@ -85,7 +108,9 @@ def main(argv: list[str] | None = None) -> int:
         if not args.equipment or not args.meas:
             list_available_configs()
             parser.error("train 需要同时指定 --equipment 与 --meas，或使用 --all")
-        train_from_config(args.equipment, args.meas, args.model_info_id, args.sqlserver_config, args.model_type)
+        train_from_config(
+            args.equipment, args.meas, args.model_info_id, args.sqlserver_config, args.model_type
+        )
         return 0
 
     if args.cmd == "serve":

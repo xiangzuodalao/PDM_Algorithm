@@ -10,7 +10,9 @@ class SeriesDecomp(nn.Module):
     def __init__(self, kernel_size: int):
         super().__init__()
         self.kernel_size = int(kernel_size)
-        self.avg = nn.AvgPool1d(kernel_size=self.kernel_size, stride=1, padding=self.kernel_size // 2)
+        self.avg = nn.AvgPool1d(
+            kernel_size=self.kernel_size, stride=1, padding=self.kernel_size // 2
+        )
 
     def forward(self, x: torch.Tensor):
         trend = self.avg(x.transpose(1, 2)).transpose(1, 2)
@@ -35,7 +37,9 @@ class AutoCorrelation(nn.Module):
         out = torch.zeros_like(v)
         for i in range(top_k):
             d = delays[..., i].unsqueeze(-1).unsqueeze(-1)
-            v_shift = torch.gather(v, dim=2, index=(torch.arange(L, device=v.device).view(1, 1, -1, 1) - d) % L)
+            v_shift = torch.gather(
+                v, dim=2, index=(torch.arange(L, device=v.device).view(1, 1, -1, 1) - d) % L
+            )
             out = out + weights[..., i].unsqueeze(-1).unsqueeze(-1) * v_shift
         return out
 
@@ -94,9 +98,13 @@ class EncoderLayer(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, d_model: int, n_heads: int, d_ff: int, dropout: float, e_layers: int, moving_avg: int):
+    def __init__(
+        self, d_model: int, n_heads: int, d_ff: int, dropout: float, e_layers: int, moving_avg: int
+    ):
         super().__init__()
-        self.layers = nn.ModuleList([EncoderLayer(d_model, n_heads, d_ff, dropout, moving_avg) for _ in range(e_layers)])
+        self.layers = nn.ModuleList(
+            [EncoderLayer(d_model, n_heads, d_ff, dropout, moving_avg) for _ in range(e_layers)]
+        )
         self.norm = nn.LayerNorm(d_model)
 
     def forward(self, x: torch.Tensor):
@@ -134,9 +142,13 @@ class DecoderLayer(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, d_model: int, n_heads: int, d_ff: int, dropout: float, d_layers: int, moving_avg: int):
+    def __init__(
+        self, d_model: int, n_heads: int, d_ff: int, dropout: float, d_layers: int, moving_avg: int
+    ):
         super().__init__()
-        self.layers = nn.ModuleList([DecoderLayer(d_model, n_heads, d_ff, dropout, moving_avg) for _ in range(d_layers)])
+        self.layers = nn.ModuleList(
+            [DecoderLayer(d_model, n_heads, d_ff, dropout, moving_avg) for _ in range(d_layers)]
+        )
         self.norm = nn.LayerNorm(d_model)
         self.proj = nn.Linear(d_model, 1)
 
@@ -180,4 +192,3 @@ class Autoformer(nn.Module):
         dec_in = self.value_emb(dec_in)
         seasonal_out, trend_out = self.decoder(dec_in, enc_out, trend)
         return seasonal_out[:, -self.pred_len :] + trend_out[:, -self.pred_len :]
-

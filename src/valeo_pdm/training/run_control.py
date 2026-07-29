@@ -49,9 +49,7 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
 
 def resolve_safe_run_dir(plan: TrainingPlan) -> Path:
     root = checkpoints_dir().resolve()
-    base_candidate = training_output_dir(
-        plan.equipment_code, plan.meas_code, plan.model_type
-    )
+    base_candidate = training_output_dir(plan.equipment_code, plan.meas_code, plan.model_type)
     base = base_candidate.resolve()
     if not _is_relative_to(base, root):
         raise TrainingPlanError(
@@ -62,9 +60,7 @@ def resolve_safe_run_dir(plan: TrainingPlan) -> Path:
     candidate = base / plan.model_info_id
     resolved = candidate.resolve(strict=False)
     if not _is_relative_to(resolved, root) or resolved.parent != base:
-        raise TrainingPlanError(
-            "训练产物目录无效", status_code=400, code="UNSAFE_OUTPUT_PATH"
-        )
+        raise TrainingPlanError("训练产物目录无效", status_code=400, code="UNSAFE_OUTPUT_PATH")
     return candidate
 
 
@@ -136,9 +132,7 @@ def initial_manifest(plan: TrainingPlan) -> dict[str, Any]:
 def update_manifest(run_dir: Path, **changes: Any) -> dict[str, Any]:
     manifest = read_manifest(run_dir)
     if manifest is None:
-        raise TrainingPlanError(
-            "训练状态不存在", status_code=404, code="TRAINING_STATUS_NOT_FOUND"
-        )
+        raise TrainingPlanError("训练状态不存在", status_code=404, code="TRAINING_STATUS_NOT_FOUND")
     manifest.update(changes)
     write_manifest(run_dir, manifest)
     return manifest

@@ -28,10 +28,16 @@ def set_seed(seed: int = 42):
 class SimpleGRUForecast(nn.Module):
     """A lightweight GRU forecaster used to simulate an independent model pipeline."""
 
-    def __init__(self, seq_len: int, pred_len: int, hidden_size: int, num_layers: int, dropout: float):
+    def __init__(
+        self, seq_len: int, pred_len: int, hidden_size: int, num_layers: int, dropout: float
+    ):
         super().__init__()
         self.gru = nn.GRU(
-            input_size=1, hidden_size=hidden_size, num_layers=num_layers, dropout=dropout if num_layers > 1 else 0.0, batch_first=True
+            input_size=1,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            dropout=dropout if num_layers > 1 else 0.0,
+            batch_first=True,
         )
         self.proj = nn.Linear(hidden_size, pred_len)
 
@@ -43,7 +49,12 @@ class SimpleGRUForecast(nn.Module):
 
 
 def build_dataloaders(
-    values: np.ndarray, seq_len: int, label_len: int, pred_len: int, batch_size: int, stride: int = 12
+    values: np.ndarray,
+    seq_len: int,
+    label_len: int,
+    pred_len: int,
+    batch_size: int,
+    stride: int = 12,
 ) -> Tuple[DataLoader, DataLoader, DataLoader, float, float]:
     X, Y = make_windows(values, seq_len, label_len, pred_len, step=stride)
     if len(X) == 0:
@@ -75,7 +86,9 @@ def train_one_epoch(
     crit = nn.MSELoss()
     total_loss = 0.0
     n = 0
-    iterator = tqdm(loader, desc=f"Epoch {epoch}/{total_epochs}", leave=False) if show_progress else loader
+    iterator = (
+        tqdm(loader, desc=f"Epoch {epoch}/{total_epochs}", leave=False) if show_progress else loader
+    )
     for x, y in iterator:
         x = x.to(device)
         y = y.to(device)
@@ -159,13 +172,19 @@ def do_training(
         values, seq_len, label_len, pred_len, batch_size, stride=stride
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = SimpleGRUForecast(seq_len=seq_len, pred_len=pred_len, hidden_size=d_model, num_layers=e_layers, dropout=dropout).to(
-        device
-    )
+    model = SimpleGRUForecast(
+        seq_len=seq_len,
+        pred_len=pred_len,
+        hidden_size=d_model,
+        num_layers=e_layers,
+        dropout=dropout,
+    ).to(device)
 
     optim = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = (
-        torch.optim.lr_scheduler.ReduceLROnPlateau(optim, mode="min", factor=lr_factor, patience=lr_patience)
+        torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optim, mode="min", factor=lr_factor, patience=lr_patience
+        )
         if lr_sched
         else None
     )
@@ -176,7 +195,14 @@ def do_training(
     val_losses: list[float] = []
     for epoch in range(1, epochs + 1):
         train_loss = train_one_epoch(
-            model, train_loader, optim, device, grad_clip=grad_clip, show_progress=True, epoch=epoch, total_epochs=epochs
+            model,
+            train_loader,
+            optim,
+            device,
+            grad_clip=grad_clip,
+            show_progress=True,
+            epoch=epoch,
+            total_epochs=epochs,
         )
         val_loss = evaluate(model, val_loader, device)
         train_losses.append(float(train_loss))

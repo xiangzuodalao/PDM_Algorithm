@@ -208,9 +208,7 @@ def _convert_param(name: str, raw: Any) -> Any:
             return float(raw)
         return str(raw).strip()
     except (TypeError, ValueError, OverflowError) as exc:
-        raise TrainingPlanError(
-            f"训练参数[{name}]的值无效", code="INVALID_PARAMETER"
-        ) from exc
+        raise TrainingPlanError(f"训练参数[{name}]的值无效", code="INVALID_PARAMETER") from exc
 
 
 def _normalize_config_params(params: Mapping[str, Any]) -> dict[str, Any]:
@@ -225,16 +223,12 @@ def _normalize_overrides(param_items: Iterable[tuple[str, Any]]) -> dict[str, An
     for raw_name, value in param_items:
         name = str(raw_name)
         if name in normalized:
-            raise TrainingPlanError(
-                f"训练参数重复: {name}", code="DUPLICATE_PARAMETER"
-            )
+            raise TrainingPlanError(f"训练参数重复: {name}", code="DUPLICATE_PARAMETER")
         normalized[name] = _convert_param(name, value)
     return normalized
 
 
-def _require_range(
-    params: Mapping[str, Any], name: str, minimum: float, maximum: float
-) -> None:
+def _require_range(params: Mapping[str, Any], name: str, minimum: float, maximum: float) -> None:
     value = params[name]
     if not math.isfinite(value) or value < minimum or value > maximum:
         raise TrainingPlanError(
@@ -261,9 +255,7 @@ def _validate_train_params(params: Mapping[str, Any]) -> None:
     if "moving_avg" in params:
         _require_range(params, "moving_avg", 1, 10000)
         if params["moving_avg"] % 2 == 0:
-            raise TrainingPlanError(
-                "训练参数[moving_avg]必须为奇数", code="INVALID_PARAMETER"
-            )
+            raise TrainingPlanError("训练参数[moving_avg]必须为奇数", code="INVALID_PARAMETER")
     if not 0 <= params["dropout"] < 1:
         raise TrainingPlanError(
             "训练参数[dropout]必须在 0（含）到 1（不含）之间",
@@ -280,9 +272,7 @@ def _validate_train_params(params: Mapping[str, Any]) -> None:
             code="INCOMPATIBLE_PARAMETERS",
         )
     if "attn_type" in params and params["attn_type"] not in {"prob", "full"}:
-        raise TrainingPlanError(
-            "训练参数[attn_type]仅支持 prob 或 full", code="INVALID_PARAMETER"
-        )
+        raise TrainingPlanError("训练参数[attn_type]仅支持 prob 或 full", code="INVALID_PARAMETER")
     try:
         validate_window_params(
             params["seq_len"], params["label_len"], params["pred_len"], params["stride"]
@@ -322,17 +312,13 @@ def build_training_plan(
     model_type = str(requested_model_type or model_config.get("model_type", "informer"))
     model_type = model_type.strip().lower()
     if model_type not in API_TRAIN_MODEL_TYPES:
-        raise TrainingPlanError(
-            f"不支持的模型类型: {model_type}", code="UNSUPPORTED_MODEL_TYPE"
-        )
+        raise TrainingPlanError(f"不支持的模型类型: {model_type}", code="UNSUPPORTED_MODEL_TYPE")
 
     source = str(requested_source).strip().lower()
     if source not in ALLOWED_DATA_SOURCES:
         raise TrainingPlanError(f"不支持的数据源: {source}", code="UNSUPPORTED_DATA_SOURCE")
     if model_type == "autoformer" and source != "csv":
-        raise TrainingPlanError(
-            "Autoformer 目前仅支持 CSV 数据源", code="UNSUPPORTED_DATA_SOURCE"
-        )
+        raise TrainingPlanError("Autoformer 目前仅支持 CSV 数据源", code="UNSUPPORTED_DATA_SOURCE")
 
     mode = str(execution_mode).strip().lower()
     if mode not in ALLOWED_EXECUTION_MODES:
