@@ -9,7 +9,6 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
-from valeo_pdm.db.data_reader import load_postgres_timeseries
 from valeo_pdm.transformer.data import (
     clean_and_resample_timeseries,
     load_series,
@@ -159,6 +158,8 @@ def do_training(
     if source == "csv":
         values = load_series(data)
     else:
+        from valeo_pdm.db.data_reader import load_postgres_timeseries
+
         df = load_postgres_timeseries(config, equipment_code, meas_code, days_back=days_back)
         series_df, _quality = clean_and_resample_timeseries(
             df,

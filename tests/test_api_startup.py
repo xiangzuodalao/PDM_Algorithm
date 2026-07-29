@@ -22,6 +22,12 @@ def test_api_app_is_importable_without_loading_a_model_stack() -> None:
     assert app is not None
 
 
+def test_simple_gru_forecast_is_importable() -> None:
+    from valeo_pdm.transformer.train_testmodel import SimpleGRUForecast
+
+    assert SimpleGRUForecast.__name__ == "SimpleGRUForecast"
+
+
 def test_fastapi_app_imports_and_healthz_works(monkeypatch: pytest.MonkeyPatch) -> None:
     from valeo_pdm.api.app import app
 
