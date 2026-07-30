@@ -89,6 +89,8 @@ Linux/amd64 本地构建中验证，其他架构需要单独验证。
 - `VALEO_PDM_SQLSERVER_CONFIG`：指定 SQL Server 状态更新配置 JSON 路径
 - `VALEO_PDM_ROOT`：显式指定项目根目录（通常不需要）
 - `VALEO_PDM_REQUIRE_TRAIN_PLAN_HASH`：设为 `1` 时，训练必须携带预览返回的计划哈希；默认 `0` 以兼容既有平台调用
+- `VALEO_PDM_ISOLATED_FIXTURE_MODE`：设为 `1` 启用隔离试点 fixture；同时必须设置非空的 `VALEO_PDM_PREDICTION_V2_BEARER_TOKEN` 和逗号分隔的规范 UUID `VALEO_PDM_ALLOWED_TENANT_IDS`
+- `VALEO_PDM_PREDICTION_V2_MANIFEST` / `VALEO_PDM_PREDICTION_V2_OBJECT_ROOT`：隔离 prediction v2 运行时清单和对象目录
 
 ## 快速使用
 
@@ -98,6 +100,7 @@ Linux/amd64 本地构建中验证，其他架构需要单独验证。
 - 训练（默认从 `configs/model_registry.yaml` 读取）：`valeo-pdm train -e <设备> -m <参数>`
 - 指定模型类型/状态回写：`valeo-pdm train -e V-SZ-ISD-102 -m CCD-Score1 --model-type testmodel --model-info-id Run_001 --sqlserver-config configs/sqlserver_config.json`
 - 全量训练：`valeo-pdm train --all`
+- 隔离 fixture：`valeo-pdm prepare-isolated-fixtures --manifest configs/isolated_fixture_manifest.yaml --output .runtime/pdm-fixtures`
 
 ### FastAPI
 
@@ -109,6 +112,7 @@ Linux/amd64 本地构建中验证，其他架构需要单独验证。
 - 模型列表：`GET /measPredict/models`
 - 数据检查：`POST /measPredict/checkData`
 - 健康检查：`GET /healthz`
+- 就绪检查：`GET /readyz`（校验隔离 fixture 实际字节和固定配置哈希）
 
 ### Codex MCP 接入
 

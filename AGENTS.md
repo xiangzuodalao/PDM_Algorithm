@@ -48,6 +48,7 @@ API 端点(前缀 `/measPredict`,**已无旧的 `/transformer` 段**,定义在 `
 - `POST /measPredict/train`(`router.py:261`)、`POST /measPredict/predict`(`router.py:479`)
 - `GET /measPredict/models`(`router.py:552`)、`POST /measPredict/checkData`(`router.py:573`)
 - `GET /healthz`(`app.py:27`)
+- `GET /readyz`：隔离 prediction v2 runtime 的字节与配置哈希就绪检查；`/healthz` 仍只检查进程。
 - `API_TRAIN_MODEL_TYPES = frozenset({"informer","autoformer"})`(`router.py:40`)-- **testmodel 不可经 API 训练**(但 `MODEL_PREDICT_FUNCS` 含 testmodel 预测)
 
 ## 代码规范
@@ -97,6 +98,7 @@ tests/                    # pytest 套件 + conftest 网络隔离 + fixtures + i
 8. **硬编码 SQL 表名**:`data_reader.py:92`(`mom_bas_ai_model_train_data`)、`config.py:118`(`mom_bas_ai_model_config`)、`train_status.py:118`。改表结构要改代码。
 9. **有完整测试套件**(旧文档“无测试”已失效):改 `data.py`/`config_resolution.py`/registry/onboard skill 后跑对应 `tests/test_*.py`;API 启动链由 `tests/test_api_startup.py` 守护;默认断网,真实库测试走 `integration_db` marker 并需授权环境变量。
 10. **API 端点已去 `/transformer` 段**:现为 `/measPredict/train` 等,别再用旧路径。
+11. **隔离 fixture 不训练**：用 `valeo-pdm prepare-isolated-fixtures --manifest configs/isolated_fixture_manifest.yaml --output .runtime/pdm-fixtures` 生成六个无换行 JSON 对象。启用 `VALEO_PDM_ISOLATED_FIXTURE_MODE=1` 时，必须提供非空 bearer token 和规范 UUID tenant allowlist；禁止生成 `.pt`、训练清单或 `artifacts/`。
 
 ## 新增模型类型 / 新增场景
 

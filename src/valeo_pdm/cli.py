@@ -65,6 +65,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_serve = sub.add_parser("serve", aliases=["s"], help="启动 FastAPI 服务")
     p_serve.set_defaults(cmd="serve")
 
+    p_fixtures = sub.add_parser("prepare-isolated-fixtures", help="生成隔离试点预测 fixture")
+    p_fixtures.add_argument("--manifest", required=True, help="隔离 fixture 清单 YAML")
+    p_fixtures.add_argument("--output", required=True, help="空的运行时输出目录")
+    p_fixtures.set_defaults(cmd="prepare-isolated-fixtures")
+
     return parser
 
 
@@ -111,6 +116,15 @@ def main(argv: list[str] | None = None) -> int:
         train_from_config(
             args.equipment, args.meas, args.model_info_id, args.sqlserver_config, args.model_type
         )
+        return 0
+
+    if args.cmd == "prepare-isolated-fixtures":
+        from pathlib import Path
+
+        from valeo_pdm.prediction_v2.fixture_generator import generate_isolated_fixtures
+
+        generated = generate_isolated_fixtures(Path(args.manifest), Path(args.output))
+        print(f"prepared {len(generated)} isolated prediction fixtures")
         return 0
 
     if args.cmd == "serve":

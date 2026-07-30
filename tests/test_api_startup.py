@@ -39,6 +39,16 @@ def test_fastapi_app_imports_and_healthz_works(monkeypatch: pytest.MonkeyPatch) 
     assert response.json() == {"status": "ok"}
 
 
+def test_readyz_is_safe_when_no_prediction_runtime_is_configured() -> None:
+    from valeo_pdm.api.app import app
+
+    with TestClient(app) as client:
+        response = client.get("/readyz")
+
+    assert response.status_code == 503
+    assert response.json() == {"status": "not_ready"}
+
+
 def test_app_import_isolated_from_pyodbc_and_test_modules_do_not_inject_it() -> None:
     """Eager DB imports or test shims would make API startup depend on a native driver."""
     root = Path(__file__).resolve().parents[1]
