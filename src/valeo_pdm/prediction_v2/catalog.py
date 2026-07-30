@@ -61,6 +61,8 @@ class ModelCatalog:
         object_root: Path,
         allowed_tenant_ids: Iterable[str],
     ) -> ModelCatalog:
+        if manifest_path.is_symlink() or object_root.is_symlink():
+            raise ValueError("prediction runtime paths must not be symlinks")
         try:
             root = object_root.resolve(strict=True)
         except OSError as exc:
@@ -74,6 +76,12 @@ class ModelCatalog:
             raise ValueError("unsupported prediction fixture mode")
         if isolated_pilot and not isolated_fixture_mode_enabled():
             raise ValueError("isolated fixture mode is not enabled")
+        if isolated_pilot and (
+            manifest_path.name != "manifest.runtime.yaml"
+            or root.name != "objects"
+            or manifest_path.resolve(strict=True).parent != root.parent
+        ):
+            raise ValueError("isolated fixture runtime layout is invalid")
         entries = raw.get("entries") if isinstance(raw, dict) else None
         if not isinstance(entries, list) or not entries:
             raise ValueError("prediction catalog entries are required")
@@ -132,7 +140,7 @@ class ModelCatalog:
                 if actual_hash != expected_hash:
                     raise ValueError("prediction artifact hash mismatch")
                 if isolated_pilot:
-                    _validate_fixed_isolated_entry(
+                    validate_fixed_isolated_entry(
                         profile, kind, expected_hash, profile_config_sha256
                     )
                 identity = (profile.model_profile_id, profile.model_info_id, profile.meas_code)
@@ -205,7 +213,7 @@ def manifest_is_isolated_pilot(manifest_path: Path) -> bool:
     return isinstance(raw, dict) and raw.get("fixture_mode") == "isolated-pilot"
 
 
-def _validate_fixed_isolated_entry(
+def validate_fixed_isolated_entry(
     profile: ModelProfile, kind: object, artifact_sha256: object, profile_config_sha256: object
 ) -> None:
     profile_id = profile.model_profile_id

@@ -6,6 +6,7 @@ from pathlib import Path
 import rfc8785
 import yaml
 
+from valeo_pdm.prediction_v2.catalog import validate_fixed_isolated_entry
 from valeo_pdm.prediction_v2.models import ModelProfile
 
 
@@ -28,11 +29,7 @@ def generate_isolated_fixtures(manifest_path: Path, output_root: Path) -> dict[s
     entries = raw.get("entries")
     if not isinstance(entries, list) or len(entries) != 6:
         raise ValueError("exactly six isolated fixture entries are required")
-    _prepare_output_root(output_root)
-    objects = output_root / "objects"
-    objects.mkdir(mode=0o700)
-    runtime_entries: list[dict[str, object]] = []
-    generated: dict[str, str] = {}
+    prepared_entries: list[tuple[dict[str, object], ModelProfile, bytes, str]] = []
     for item in entries:
         if not isinstance(item, dict):
             raise ValueError("invalid isolated fixture entry")
@@ -57,6 +54,22 @@ def generate_isolated_fixtures(manifest_path: Path, output_root: Path) -> dict[s
         artifact_sha256 = hashlib.sha256(artifact).hexdigest()
         if artifact_sha256 != item.get("artifact_sha256"):
             raise ValueError("isolated fixture artifact does not match its fixed hash")
+        validate_fixed_isolated_entry(
+            profile,
+            item.get("kind"),
+            item.get("artifact_sha256"),
+            item.get("profile_config_sha256"),
+        )
+        prepared_entries.append((item, profile, artifact, artifact_sha256))
+    if len({profile.model_profile_id for _, profile, _, _ in prepared_entries}) != 6:
+        raise ValueError("exactly six fixed isolated fixture profiles are required")
+
+    _prepare_output_root(output_root)
+    objects = output_root / "objects"
+    objects.mkdir(mode=0o700)
+    runtime_entries: list[dict[str, object]] = []
+    generated: dict[str, str] = {}
+    for item, profile, artifact, artifact_sha256 in prepared_entries:
         artifact_path = f"{profile.model_profile_id}.json"
         with (objects / artifact_path).open("xb") as stream:
             stream.write(artifact)

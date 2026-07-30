@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -44,6 +45,36 @@ def test_readyz_is_healthy_only_for_all_six_unchanged_fixed_fixtures(
 
     assert readiness_status(app) == 200
     (output_root / "objects" / "pilot-cnc-vibration.json").unlink()
+    assert readiness_status(app) == 503
+
+
+def test_readyz_rejects_a_byte_tampered_fixture(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A changed fixture byte must not pass readiness using the manifest's old digest."""
+    output_root = configure_isolated_runtime(monkeypatch, tmp_path)
+    artifact = output_root / "objects" / "pilot-cnc-vibration.json"
+    artifact.write_bytes(artifact.read_bytes() + b"x")
+    from valeo_pdm.api.app import app
+
+    assert readiness_status(app) == 503
+
+
+def test_readyz_requires_the_generated_runtime_manifest_and_sibling_objects_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Independently supplied source manifests or object roots must not become a runtime catalog."""
+    output_root = configure_isolated_runtime(monkeypatch, tmp_path)
+    alternate_objects = tmp_path / "alternate-objects"
+    shutil.copytree(output_root / "objects", alternate_objects)
+    from valeo_pdm.api.app import app
+
+    monkeypatch.setenv("VALEO_PDM_PREDICTION_V2_MANIFEST", str(MANIFEST))
+    assert readiness_status(app) == 503
+    monkeypatch.setenv(
+        "VALEO_PDM_PREDICTION_V2_MANIFEST", str(output_root / "manifest.runtime.yaml")
+    )
+    monkeypatch.setenv("VALEO_PDM_PREDICTION_V2_OBJECT_ROOT", str(alternate_objects))
     assert readiness_status(app) == 503
 
 

@@ -6,7 +6,11 @@ from pathlib import Path
 import pytest
 import yaml
 
-from valeo_pdm.prediction_v2.fixture_generator import generate_isolated_fixtures
+from valeo_pdm.prediction_v2.fixture_generator import (
+    build_fixture_artifact,
+    generate_isolated_fixtures,
+)
+from valeo_pdm.prediction_v2.models import ModelProfile
 
 
 COMPONENT_ROOT = Path(__file__).resolve().parents[1]
@@ -69,6 +73,61 @@ def test_generator_refuses_an_occupied_or_symlinked_output_directory(
 
     with pytest.raises(ValueError, match="empty|symlink"):
         generate_isolated_fixtures(MANIFEST, output_root)
+
+
+@pytest.mark.parametrize("model_profile_id", ["../../escaped", "/tmp/absolute-escaped"])
+def test_generator_rejects_profile_ids_that_could_escape_the_objects_directory(
+    tmp_path: Path, model_profile_id: str
+) -> None:
+    """A manifest-controlled profile ID must never select an output path outside objects/."""
+    raw = yaml.safe_load(MANIFEST.read_text(encoding="utf-8"))
+    entry = raw["entries"][0]
+    if model_profile_id.startswith("/"):
+        model_profile_id = str(tmp_path / "absolute-escaped")
+    entry["model_profile_id"] = model_profile_id
+    profile = ModelProfile.model_validate(
+        {
+            key: entry[key]
+            for key in (
+                "model_profile_id",
+                "model_info_id",
+                "meas_code",
+                "unit",
+                "value_scale",
+                "sampling_frequency",
+                "request_window_points",
+                "context_points",
+                "horizon_points",
+                "preprocessing_version",
+            )
+        }
+    )
+    entry["artifact_sha256"] = hashlib.sha256(build_fixture_artifact(profile)).hexdigest()
+    malicious_manifest = tmp_path / "malicious.yaml"
+    malicious_manifest.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    output_root = tmp_path / "runtime"
+
+    with pytest.raises(ValueError, match="isolated fixture"):
+        generate_isolated_fixtures(malicious_manifest, output_root)
+
+    assert not (tmp_path / "escaped.json").exists()
+    assert not (tmp_path / "absolute-escaped.json").exists()
+
+
+def test_generator_requires_each_of_the_six_fixed_profile_ids_before_creating_output(
+    tmp_path: Path,
+) -> None:
+    """Duplicating one approved profile must not leave a partial fixture directory."""
+    raw = yaml.safe_load(MANIFEST.read_text(encoding="utf-8"))
+    raw["entries"][-1] = dict(raw["entries"][0])
+    duplicate_manifest = tmp_path / "duplicate.yaml"
+    duplicate_manifest.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    output_root = tmp_path / "runtime"
+
+    with pytest.raises(ValueError, match="six fixed"):
+        generate_isolated_fixtures(duplicate_manifest, output_root)
+
+    assert not output_root.exists()
 
 
 def test_cli_prepare_isolated_fixtures_generates_the_runtime(tmp_path: Path) -> None:
