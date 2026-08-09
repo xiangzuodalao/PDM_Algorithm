@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 import pyodbc
 
+
 def load_sqlserver_classification(config_path: str):
     with open(config_path, "r", encoding="utf-8") as f:
         cfg = json.load(f)
@@ -26,7 +27,9 @@ def _parse_pg_conn_str(s: str):
     return d
 
 
-def load_postgres_timeseries(config_path: str, equipment_code: str, meas_code: str, days_back: int = 30):
+def load_postgres_timeseries(
+    config_path: str, equipment_code: str, meas_code: str, days_back: int = 30
+):
     try:
         import pandas as pd
         import psycopg2
@@ -67,7 +70,9 @@ def preprocess_timeseries(df):
     return df
 
 
-def load_sqlserver_timeseries(config_path: str, equipment_code: str, meas_code: str, days_back: int) -> pd.DataFrame:
+def load_sqlserver_timeseries(
+    config_path: str, equipment_code: str, meas_code: str, days_back: int
+) -> pd.DataFrame:
     """
     从 SQL Server 数据库中拉取指定设备和测点的时序数据。
     """
@@ -96,7 +101,7 @@ def load_sqlserver_timeseries(config_path: str, equipment_code: str, meas_code: 
         ORDER BY CollectTime ASC
     """
 
-    print(f"正在从 SQL Server 数据库连接 {conn_str}")
+    print("正在连接 SQL Server 读取时序数据")
     print(f"正在从 SQL Server 拉取 {equipment_code} - {meas_code} 过去 {days_back} 天的数据...")
 
     with pyodbc.connect(conn_str) as conn:
@@ -113,6 +118,8 @@ def load_sqlserver_timeseries(config_path: str, equipment_code: str, meas_code: 
             df = pd.DataFrame([tuple(row) for row in rows], columns=cols)
 
     if df.empty:
-        raise ValueError(f"SQL Server 数据源返回空数据! 请检查设备 {equipment_code} 在过去 {days_back} 天内是否有数据。")
+        raise ValueError(
+            f"SQL Server 数据源返回空数据! 请检查设备 {equipment_code} 在过去 {days_back} 天内是否有数据。"
+        )
 
     return df

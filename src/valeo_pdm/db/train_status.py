@@ -14,6 +14,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 try:
     import pyodbc  # type: ignore
+
     _pyodbc_import_error: Exception | None = None
 except Exception as e:  # noqa: BLE001 - 捕获驱动缺失的 ImportError
     pyodbc = None
@@ -49,11 +50,15 @@ class SqlServerStatusConfig:
             activate_column=data.get("activate_column", cls.activate_column),
             activate_value=data.get("activate_value", cls.activate_value),
             attachments_column=data.get("attachments_column", cls.attachments_column),
-            attachments_max_length=int(data.get("attachments_max_length", cls.attachments_max_length)),
+            attachments_max_length=int(
+                data.get("attachments_max_length", cls.attachments_max_length)
+            ),
             status_running=int(data.get("status_running", cls.status_running)),
             status_success=int(data.get("status_success", cls.status_success)),
             status_failed=int(data.get("status_failed", cls.status_failed)),
-            description_max_length=int(data.get("description_max_length", cls.description_max_length)),
+            description_max_length=int(
+                data.get("description_max_length", cls.description_max_length)
+            ),
         )
 
 
@@ -81,12 +86,12 @@ class SqlServerTrainStatusUpdater:
         return pyodbc.connect(self.cfg.conn_str, autocommit=True)
 
     def _update(
-            self,
-            model_info_id: str,
-            status: int,
-            description: str,
-            end_time: datetime | None,
-            attachments: str | None = None,
+        self,
+        model_info_id: str,
+        status: int,
+        description: str,
+        end_time: datetime | None,
+        attachments: str | None = None,
     ) -> None:
         desc = (description or "").strip()
         if desc and len(desc) > self.cfg.description_max_length:
@@ -101,13 +106,20 @@ class SqlServerTrainStatusUpdater:
 
         if attachments and self.cfg.attachments_column:
             att = attachments.strip()
-            if att and self.cfg.attachments_max_length and len(att) > self.cfg.attachments_max_length:
+            if (
+                att
+                and self.cfg.attachments_max_length
+                and len(att) > self.cfg.attachments_max_length
+            ):
                 att = att[: self.cfg.attachments_max_length]
             set_clauses.append(f"{self.cfg.attachments_column} = ?")
             params.append(att)
 
-        query = f"UPDATE {self.cfg.table} WITH (ROWLOCK) SET " + ", ".join(
-            set_clauses) + f" WHERE 1=1 and (IsRecent = '1' or IsRecent is null) and {self.cfg.id_column} = ?"
+        query = (
+            f"UPDATE {self.cfg.table} WITH (ROWLOCK) SET "
+            + ", ".join(set_clauses)
+            + f" WHERE 1=1 and (IsRecent = '1' or IsRecent is null) and {self.cfg.id_column} = ?"
+        )
         params.append(model_info_id)
 
         if self.cfg.activate_column:
@@ -132,13 +144,17 @@ class SqlServerTrainStatusUpdater:
     def mark_running(self, model_info_id: str, description: str = "训练中") -> None:
         self._update(model_info_id, self.cfg.status_running, description, None)
 
-    def mark_success(self, model_info_id: str, description: str = "训练成功", attachments: str | None = None) -> None:
-        self._update(model_info_id, self.cfg.status_success, description, datetime.now(), attachments)
-        self._update_model_info_status(model_info_id, '训练完成待发布')
+    def mark_success(
+        self, model_info_id: str, description: str = "训练成功", attachments: str | None = None
+    ) -> None:
+        self._update(
+            model_info_id, self.cfg.status_success, description, datetime.now(), attachments
+        )
+        self._update_model_info_status(model_info_id, "训练完成待发布")
 
     def mark_failed(self, model_info_id: str, description: str = "训练失败") -> None:
         self._update(model_info_id, self.cfg.status_failed, description, datetime.now())
-        self._update_model_info_status(model_info_id, '训练失败')
+        self._update_model_info_status(model_info_id, "训练失败")
 
     def _update_model_info_status(self, model_info_id: str, status_text: str) -> None:
         """
@@ -152,7 +168,9 @@ class SqlServerTrainStatusUpdater:
                 cursor.execute(query, (status_text, model_info_id))
 
                 if cursor.rowcount == 0:
-                    print(f"警告: 未能在 mom_bas_ai_model_info 中找到对应记录，f_id: {model_info_id}")
+                    print(
+                        f"警告: 未能在 mom_bas_ai_model_info 中找到对应记录，f_id: {model_info_id}"
+                    )
 
             conn.commit()
         except Exception as e:
@@ -160,6 +178,7 @@ class SqlServerTrainStatusUpdater:
             # 这里可以选择是否抛出异常，通常作为附属更新，打印错误即可，不阻断主流程
         finally:
             conn.close()
+
 
 def _get_upload_url() -> str | None:
     """
@@ -174,6 +193,7 @@ def _get_upload_url() -> str | None:
     # 2. 从全局通用配置文件中读取对应的 key
     app_config = _get_app_config()
     return app_config.get("upload_url")
+
 
 def upload_forecast_image(file_path: str) -> str | None:
     """
@@ -194,8 +214,8 @@ def upload_forecast_image(file_path: str) -> str | None:
 
     try:
         # 构造 form-data
-        with open(file_path, 'rb') as f:
-            files = {'file': (os.path.basename(file_path), f, 'image/png')}
+        with open(file_path, "rb") as f:
+            files = {"file": (os.path.basename(file_path), f, "image/png")}
 
             # 加入 verify=False，强行跳过 SSL 证书合法性检查
             response = requests.post(upload_url, files=files, timeout=timeout, verify=False)
@@ -213,7 +233,7 @@ def upload_forecast_image(file_path: str) -> str | None:
                         "name": data_obj.get("name"),
                         "fileId": data_obj.get("fileId"),
                         "url": data_obj.get("url"),
-                        "thumbUrl": data_obj.get("thumbUrl")
+                        "thumbUrl": data_obj.get("thumbUrl"),
                     }
                 ]
                 # 将字典转为 JSON 字符串
@@ -235,11 +255,7 @@ def _get_app_config() -> dict:
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except Exception as e:
-            print(f"读取全局配置文件失败 ({config_path}): {e}")
+        except Exception:
+            print("读取全局上传配置失败，已隐藏本地配置细节。")
 
     return {}
-
-
-
-

@@ -10,6 +10,7 @@ ROUTE_MAP = {
     "order": "http://localhost:8002",
 }
 
+
 # 1. 使用 lifespan 管理全局的 httpx 客户端连接池
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -23,10 +24,14 @@ async def lifespan(app: FastAPI):
     await app.state.client.aclose()
     print("Gateway Shutdown. Connection pool closed.")
 
+
 app = FastAPI(title="FastAPI Microservice Gateway", lifespan=lifespan)
 
+
 # 2. 核心路由：捕获所有带有服务前缀的请求
-@app.api_route("/{service}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
+@app.api_route(
+    "/{service}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]
+)
 async def gateway_proxy(service: str, path: str, request: Request):
     # 查找目标服务 URL
     target_base = ROUTE_MAP.get(service)
@@ -49,7 +54,7 @@ async def gateway_proxy(service: str, path: str, request: Request):
             url=target_url,
             headers=headers,
             params=request.query_params,
-            content=request.stream()
+            content=request.stream(),
         )
 
         # 4. 发送请求并获取流式响应
@@ -58,11 +63,11 @@ async def gateway_proxy(service: str, path: str, request: Request):
 
         # 5. 将后端响应以流的形式返回给客户端
         return StreamingResponse(
-            content=httpx_resp.aiter_raw(), # 异步迭代获取响应块
+            content=httpx_resp.aiter_raw(),  # 异步迭代获取响应块
             status_code=httpx_resp.status_code,
             headers=dict(httpx_resp.headers),
             # 重要：当响应发送完毕后，由后台任务关闭后端的响应流
-            background=BackgroundTask(httpx_resp.aclose)
+            background=BackgroundTask(httpx_resp.aclose),
         )
 
     except httpx.ConnectError:

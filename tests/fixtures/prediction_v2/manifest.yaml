@@ -1,0 +1,13 @@
+entries:
+  - model_profile_id: pilot-cnc-vibration
+    model_info_id: pilot-fixture-v1-cnc-vibration
+    meas_code: vibration_rms
+    unit: mm/s
+    value_scale: 2
+    sampling_frequency: 1min
+    request_window_points: 66
+    context_points: 60
+    horizon_points: 15
+    preprocessing_version: pdm-v2-pilot-1
+    artifact_path: fixture.json
+    artifact_sha256: 5feeb31058fe0521f94758faa22214afe4619e466e22cbb8c6fb7ffcf2369562

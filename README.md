@@ -13,20 +13,16 @@
 
 ### 推荐：使用 `uv`
 
-1) 创建虚拟环境（Python 3.11/3.12 均可）：
+Python 3.12、运行时依赖及 CPU 版 PyTorch 均由 `uv.lock` 固定。按锁文件同步环境：
 
 ```bash
-uv venv --python 3.12
+uv sync --frozen
 ```
 
-2) 安装项目：
- - 准备工作：先注释掉`pyproject.toml`中的torch部分，然后执行以下命令
-```bash
-uv pip install -e .
-```
- - 去torch官网，复制命令进行安装，例如`uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130`
-<!-- uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128-->
-3) 运行命令：
+`pyproject.toml` 的显式 `pytorch-cpu` 索引会安装锁定的 CPU wheel；不要注释
+`torch`、另行安装 Torch/torchvision，或在此环境中混入 CUDA 包。
+
+同步完成后运行：
 
 ```bash
 uv run valeo-pdm list-models
@@ -36,12 +32,6 @@ uv run valeo-pdm serve --host 0.0.0.0 --port 8000
 ```
 
 如果不想每次都写 `uv run`，也可以激活环境后直接用 `valeo-pdm ...`。
-
-### 传统 pip（不推荐）
-
-```bash
-python3 -m pip install -e .
-```
 
 ## 训练
 
@@ -79,6 +69,13 @@ uvicorn valeo_pdm.api.app:app --host 0.0.0.0 --port 8000
 
 见 `docs/docker-deploy.md`。
 
+默认 Docker 镜像使用仅 CPU 的 PyTorch，不会请求 NVIDIA 设备；训练与预测 API 均保持可用，但生产规模训练可能较慢。如需 GPU 镜像，必须使用独立的 Dockerfile/profile，并且只配置一个 CUDA/PyTorch 索引；不要向默认 lock 文件添加 CUDA 包。
+
+默认 Compose 服务仅监听 `127.0.0.1:10021`。为兼容既有部署，
+`docker-compose.yml` 保留 `./src:/app/src` 源码挂载；运行时代码来自宿主机当前
+checkout，部署时应确保它与构建版本一致。Dockerfile 的外部镜像摘要已在
+Linux/amd64 本地构建中验证，其他架构需要单独验证。
+
 ## 配置
 
 - `configs/model_registry.yaml`：设备/参数 -> 模型配置与训练超参数
@@ -91,6 +88,9 @@ uvicorn valeo_pdm.api.app:app --host 0.0.0.0 --port 8000
 - `VALEO_PDM_POSTGRES_CONFIG`：指定 PostgreSQL 配置 JSON 路径
 - `VALEO_PDM_SQLSERVER_CONFIG`：指定 SQL Server 状态更新配置 JSON 路径
 - `VALEO_PDM_ROOT`：显式指定项目根目录（通常不需要）
+- `VALEO_PDM_REQUIRE_TRAIN_PLAN_HASH`：设为 `1` 时，训练必须携带预览返回的计划哈希；默认 `0` 以兼容既有平台调用
+- `VALEO_PDM_ISOLATED_FIXTURE_MODE`：设为 `1` 启用隔离试点 fixture；同时必须设置非空的 `VALEO_PDM_PREDICTION_V2_BEARER_TOKEN` 和逗号分隔的规范 UUID `VALEO_PDM_ALLOWED_TENANT_IDS`
+- `VALEO_PDM_PREDICTION_V2_MANIFEST` / `VALEO_PDM_PREDICTION_V2_OBJECT_ROOT`：隔离 prediction v2 运行时清单和对象目录
 
 ## 快速使用
 
@@ -100,19 +100,31 @@ uvicorn valeo_pdm.api.app:app --host 0.0.0.0 --port 8000
 - 训练（默认从 `configs/model_registry.yaml` 读取）：`valeo-pdm train -e <设备> -m <参数>`
 - 指定模型类型/状态回写：`valeo-pdm train -e V-SZ-ISD-102 -m CCD-Score1 --model-type testmodel --model-info-id Run_001 --sqlserver-config configs/sqlserver_config.json`
 - 全量训练：`valeo-pdm train --all`
+- 隔离 fixture：`valeo-pdm prepare-isolated-fixtures --manifest configs/isolated_fixture_manifest.yaml --output .runtime/pdm-fixtures`
 
 ### FastAPI
 
 - 启动：`valeo-pdm serve --host 0.0.0.0 --port 8000`
-- 训练接口：`POST /measPredict/transformer/train`，必填 `EquipmentCode/MeasCode/ModelInfoID/ParamArr`，可选 `ModelType`（`informer`/`testmodel`/`autoformer`），`ParamArr` 可覆盖训练参数。
-- 预测接口：`POST /measPredict/transformer/predict`，可选 `ModelInfoID`（为空用默认最新）、`ModelType`。
-- 模型列表：`GET /measPredict/transformer/models`
+- 训练预览：`POST /measPredict/train/preview`，返回最终生效参数和 `plan_hash`，不读取训练数据、不启动训练；数据检查由 `/checkData` 或 MCP 的 `pdm_prepare_training` 编排完成。
+- 训练接口：`POST /measPredict/train`，必填 `EquipmentCode/MeasCode/ModelInfoID/ParamArr/DataSource`；API 训练仅支持 `informer`/`autoformer`。
+- 训练状态：`GET /measPredict/train/status`
+- 预测接口：`POST /measPredict/predict`，可选 `ModelInfoID`（为空使用固定默认 checkpoint）、`ModelType`。
+- 模型列表：`GET /measPredict/models`
+- 数据检查：`POST /measPredict/checkData`
 - 健康检查：`GET /healthz`
+- 就绪检查：`GET /readyz`（校验隔离 fixture 实际字节和固定配置哈希）
+
+### Codex MCP 接入
+
+- 本仓只提供 PDM FastAPI 以及 `compose.mcp-smoke.yml` API 冒烟目标，不再维护 MCP Server 或训练 Skill 的副本。
+- 平台 MCP 由私有 `ifactory-platform` 总仓的 `components/digital-mcp` 维护；训练 Skill 由该总仓的 `.agents/skills` 维护。
+- 本地安全冒烟：`docker compose -f compose.mcp-smoke.yml up -d --build`，API 仅监听 `127.0.0.1:10022`，不挂载真实数据库配置。
+- Codex 注册、工具契约和训练审批流程以私有 `ifactory-platform` 总仓为准。
 
 ### 数据源
 
 - PostgreSQL（默认）：按 `configs/postgres_config.json` 里 SQL 查询拉取数据。
-- CSV：在 `configs/model_registry.yaml` 对应条目设置 `source: csv`、`data_path: <路径>`（相对项目根或绝对路径），格式需包含 `value` 列，最好有 `collect_time/collecttime/timestamp`。
+- CSV：在 `configs/model_registry.yaml` 对应条目设置 `source: csv`、`data_path: data/<文件>`。API/MCP 只接受 `data/` 下的相对路径，并拒绝 `..`、绝对路径和解析后越界的符号链接；格式需包含 `value` 列，最好有 `collect_time/collecttime/timestamp`。
 
 ### 训练状态回写（可选）
 
@@ -145,8 +157,8 @@ uvicorn valeo_pdm.api.app:app --host 0.0.0.0 --port 8000
    - CSV：设定 `source: csv`、`data_path`，CSV 至少有 `value` 列，建议有 `collect_time`（或 `collecttime/timestamp` 会被映射）。
 3) 运行：
    - CLI：`valeo-pdm train -e EQP-001 -m SENSOR_A`
-   - API：训练 `POST /measPredict/transformer/train`，传 `EquipmentCode/MeasCode/ModelInfoID`，可选 `ModelType` 覆盖
-   - 预测同理，`ModelInfoID` 不传则用默认最新
+   - API：训练 `POST /measPredict/train`，传 `EquipmentCode/MeasCode/ModelInfoID/ParamArr/DataSource`，可选 `ModelType` 覆盖
+   - 预测使用 `POST /measPredict/predict`；`ModelInfoID` 不传时使用固定默认 checkpoint
 
 ## 如何新增模型类型（自定义 model_type）
 
@@ -202,7 +214,9 @@ uvicorn valeo_pdm.api.app:app --host 0.0.0.0 --port 8000
     "MeasCode": "CCD-Score1",
     "ModelInfoID": "Run_001",
     "ModelType": "informer",
-    "ParamArr": [{ "FieldName": "epochs", "CurValue": 3 }]
+    "ParamArr": [{ "FieldName": "epochs", "CurValue": 3 }],
+    "DataSource": "postgres",
+    "ExecutionMode": "platform"
   }
   ```
 - API 预测 JSON 示例：
@@ -218,78 +232,3 @@ uvicorn valeo_pdm.api.app:app --host 0.0.0.0 --port 8000
 
 ## 提示
 - `testmodel` 是简化 GRU 示例，如需真实模型可按“新增模型类型”步骤替换。
-
-# docker 启动
-sudo groupadd docker
-sudo usermod -aG docker $USER
-docker compose down
-docker compose build
-docker compose up -d
-docker compose logs -f --tail=100 valeo-pdm-api
-
-torch==2.10.0
-torchvision==0.25.0+cu128
-
-
-# uv 
-uv pip install pipreqs
-pipreqs .   --encoding=utf8   --savepath temp_reqs.txt   --ignore .venv,.git,__pycache__,data,model,notebooks,.ipynb_checkpoints,artifacts   --use-local
-uv pip freeze > tmp_reqs.txt
-# 去除本项目循环依赖和torch
-uv add -r tmp_reqs.txt
-uv lock
-
-# 产物模型文件等权限问题
-sudo chown -R 10001:10001 ./artifacts ./data ./build ./docs
-
-
-# nginx 修改配置
-sudo docker compose exec nginx nginx -s reload
-
-# 配置文件修改完成后重启
-docker compose restart valeo-pdm-api
-
-<!-- 重建虚拟环境 -->
-deactivate
-rm -rf .venv
-UV_LINK_MODE=copy uv venv --python 3.12
-source .venv/bin/activate
-uv pip install -e . --index-url https://pypi.tuna.tsinghua.edu.cn/simple
-uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
-uv pip install requests  --index-url https://pypi.tuna.tsinghua.edu.cn/simple
-uv pip install setuptools  --index-url https://pypi.tuna.tsinghua.edu.cn/simple
-uv pip install mlstm_kernels  --index-url https://pypi.tuna.tsinghua.edu.cn/simple
-uv pip install transformers  --index-url https://pypi.tuna.tsinghua.edu.cn/simple
-
-# 安装 db driver 
-sudo su
-sed -i 's/deb.ubuntu.org/mirrors.tsinghua.com/g' /etc/apt/sources.list && \
-    sed -i 's/security.ubuntu.org/mirrors.tsinghua.com/g' /etc/apt/sources.list && \
-    apt-get update && \
-    (sed -i 's/deb.debian.org/mirrors.tsinghua.com/g' /etc/apt/sources.list.d/debian.sources 2>dev/null || true) && \
-    (sed -i 's/security.debian.org/mirrors.tsinghua.com/g' /etc/apt/sources.list.d/debian.sources 2>dev/null || true) && \
-    (sed -i 's/deb.debian.org/mirrors.tsinghua.com/g' /etc/apt/sources.list 2>dev/null || true) && \
-    (sed -i 's/security.debian.org/mirrors.tsinghua.com/g' /etc/apt/sources.list 2>dev/null || true) && \
-    apt-get install -y --no-install-recommends \
-    python3.12 \
-    ca-certificates \
-    unixodbc \
-    unixodbc-dev \
-    curl \
-    gnupg \
-    lsb-release \
-    && rm -rf /var/lib/apt/lists/*
-
-mkdir -p /usr/share/keyrings && \
-    curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /usr/share/keyrings/microsoft.gpg && \
-    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/ubuntu/24.04/prod $(lsb_release -cs) main" | \
-        tee /etc/apt/sources.list.d/mssql-release.list && \
-    apt-get update && \
-    ACCEPT_EULA=Y apt-get install -y msodbcsql18 mssql-tools18 && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
-
-apt-get update && apt-get install -y odbc-postgresql \
-    && apt-get clean
-
-<!-- 重建虚拟环境 end -->

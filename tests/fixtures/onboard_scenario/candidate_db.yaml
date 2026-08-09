@@ -1,0 +1,7 @@
+equipment_code: DB-NEW
+meas_code: TEMP
+config:
+  train_params:
+    seq_len: 4
+    label_len: 2
+    pred_len: 2

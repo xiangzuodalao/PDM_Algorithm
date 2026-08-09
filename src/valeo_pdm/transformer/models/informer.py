@@ -16,8 +16,8 @@ class PositionalEncoding(nn.Module):
         self.register_buffer("pe", pe)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        l = x.size(1)
-        return x + self.pe[:l].unsqueeze(0)
+        layer = x.size(1)
+        return x + self.pe[:layer].unsqueeze(0)
 
 
 class TokenEmbedding(nn.Module):
@@ -72,7 +72,11 @@ class ProbAttention(nn.Module):
         self.factor = factor
 
     def forward(
-        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, attn_mask: Optional[torch.Tensor] = None
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         B, H, Lq, Dh = q.shape
         Lk = k.size(2)
@@ -80,7 +84,7 @@ class ProbAttention(nn.Module):
 
         scores_full = torch.einsum("bhqd,bhkd->bhqk", q, k) * scale
         if attn_mask is not None:
-            scores_full = scores_full.masked_fill(attn_mask == True, float("-inf"))
+            scores_full = scores_full.masked_fill(attn_mask, float("-inf"))
 
         sparsity = scores_full.abs().max(dim=-1).values
         u = max(1, int(self.factor * math.log(max(Lk, 2))))
@@ -121,10 +125,16 @@ class MultiHeadAttention(nn.Module):
         self.v_proj = nn.Linear(d_model, d_model)
         self.out_proj = nn.Linear(d_model, d_model)
         self.dropout = nn.Dropout(dropout)
-        self.prob_attn = ProbAttention(self.d_head, n_heads, dropout) if attn_type == "prob" else None
+        self.prob_attn = (
+            ProbAttention(self.d_head, n_heads, dropout) if attn_type == "prob" else None
+        )
 
     def forward(
-        self, x_q: torch.Tensor, x_k: torch.Tensor, x_v: torch.Tensor, attn_mask: Optional[torch.Tensor] = None
+        self,
+        x_q: torch.Tensor,
+        x_k: torch.Tensor,
+        x_v: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         q = _split_heads(self.q_proj(x_q), self.n_heads)
         k = _split_heads(self.k_proj(x_k), self.n_heads)
@@ -136,7 +146,7 @@ class MultiHeadAttention(nn.Module):
             scale = 1.0 / math.sqrt(self.d_head)
             scores = torch.einsum("bhqd,bhkd->bhqk", q, k) * scale
             if attn_mask is not None:
-                scores = scores.masked_fill(attn_mask == True, float("-inf"))
+                scores = scores.masked_fill(attn_mask, float("-inf"))
             attn = torch.softmax(scores, dim=-1)
             attn = self.dropout(attn)
             out = torch.einsum("bhqk,bhkd->bhqd", attn, v)
@@ -147,7 +157,9 @@ class MultiHeadAttention(nn.Module):
 
 
 class EncoderLayer(nn.Module):
-    def __init__(self, d_model: int, n_heads: int, d_ff: int, dropout: float, attn_type: str = "prob"):
+    def __init__(
+        self, d_model: int, n_heads: int, d_ff: int, dropout: float, attn_type: str = "prob"
+    ):
         super().__init__()
         self.attn = MultiHeadAttention(d_model, n_heads, dropout, attn_type=attn_type)
         self.conv1 = nn.Conv1d(d_model, d_ff, kernel_size=1)
@@ -194,10 +206,17 @@ class Encoder(nn.Module):
     ):
         super().__init__()
         self.layers = nn.ModuleList(
-            [EncoderLayer(d_model, n_heads, d_ff, dropout, attn_type=attn_type) for _ in range(e_layers)]
+            [
+                EncoderLayer(d_model, n_heads, d_ff, dropout, attn_type=attn_type)
+                for _ in range(e_layers)
+            ]
         )
         self.distil = distil
-        self.conv_layers = nn.ModuleList([ConvLayer(d_model) for _ in range(e_layers - 1)]) if distil and e_layers > 1 else None
+        self.conv_layers = (
+            nn.ModuleList([ConvLayer(d_model) for _ in range(e_layers - 1)])
+            if distil and e_layers > 1
+            else None
+        )
         self.norm = nn.LayerNorm(d_model)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -239,7 +258,9 @@ class DecoderLayer(nn.Module):
 class Decoder(nn.Module):
     def __init__(self, d_model: int, n_heads: int, d_ff: int, dropout: float, d_layers: int):
         super().__init__()
-        self.layers = nn.ModuleList([DecoderLayer(d_model, n_heads, d_ff, dropout) for _ in range(d_layers)])
+        self.layers = nn.ModuleList(
+            [DecoderLayer(d_model, n_heads, d_ff, dropout) for _ in range(d_layers)]
+        )
         self.norm = nn.LayerNorm(d_model)
 
     def forward(self, x: torch.Tensor, enc_out: torch.Tensor) -> torch.Tensor:
@@ -270,7 +291,9 @@ class Informer(nn.Module):
 
         self.enc_embedding = DataEmbedding(d_model, dropout)
         self.dec_embedding = DataEmbedding(d_model, dropout)
-        self.encoder = Encoder(d_model, n_heads, d_ff, dropout, e_layers, attn_type=attn_type, distil=distil)
+        self.encoder = Encoder(
+            d_model, n_heads, d_ff, dropout, e_layers, attn_type=attn_type, distil=distil
+        )
         self.decoder = Decoder(d_model, n_heads, d_ff, dropout, d_layers)
         self.proj = nn.Linear(d_model, 1)
 
@@ -286,4 +309,3 @@ class Informer(nn.Module):
         dec_out = self.decoder(dec_in, enc_out)
         out = self.proj(dec_out[:, -self.pred_len :, :]).squeeze(-1)
         return out
-

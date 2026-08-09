@@ -1,0 +1,86 @@
+fixture_mode: isolated-pilot
+entries:
+  - kind: repeat-last
+    model_profile_id: pilot-cnc-vibration
+    model_info_id: pilot-fixture-v1-cnc-vibration
+    meas_code: vibration_rms
+    unit: mm/s
+    value_scale: 2
+    sampling_frequency: 1min
+    request_window_points: 66
+    context_points: 60
+    horizon_points: 15
+    preprocessing_version: pdm-v2-pilot-1
+    artifact_path: pilot-cnc-vibration.json
+    artifact_sha256: 5feeb31058fe0521f94758faa22214afe4619e466e22cbb8c6fb7ffcf2369562
+    profile_config_sha256: 4db612fb9af5095479fc5ecd03e2118d848f79e5c149073fce2df10cf34c64c1
+  - kind: repeat-last
+    model_profile_id: pilot-injection-pressure
+    model_info_id: pilot-fixture-v1-injection-pressure
+    meas_code: injection_pressure
+    unit: bar
+    value_scale: 1
+    sampling_frequency: 1min
+    request_window_points: 66
+    context_points: 60
+    horizon_points: 15
+    preprocessing_version: pdm-v2-pilot-1
+    artifact_path: pilot-injection-pressure.json
+    artifact_sha256: 6e3faef72b69bbd7e9562e871f405a38286075461d1b0c3a5d170c72d7e0f1a9
+    profile_config_sha256: 9c37acf828421f27f25b32c10453ff74c0108993822af2997e5379879406b390
+  - kind: repeat-last
+    model_profile_id: pilot-robot-position
+    model_info_id: pilot-fixture-v1-robot-position
+    meas_code: position_deviation
+    unit: mm
+    value_scale: 3
+    sampling_frequency: 1min
+    request_window_points: 66
+    context_points: 60
+    horizon_points: 15
+    preprocessing_version: pdm-v2-pilot-1
+    artifact_path: pilot-robot-position.json
+    artifact_sha256: 11f162e58f9958ed405a8c67dcbb780900321385d8c2eb45122367b11ed5016e
+    profile_config_sha256: a33b9a84f88c2c5c78d99a0ccd222422c145cb495e4fe8c5b289010f4e768368
+  - kind: repeat-last
+    model_profile_id: pilot-tightening-torque
+    model_info_id: pilot-fixture-v1-tightening-torque
+    meas_code: torque
+    unit: N·m
+    value_scale: 2
+    sampling_frequency: 1min
+    request_window_points: 66
+    context_points: 60
+    horizon_points: 15
+    preprocessing_version: pdm-v2-pilot-1
+    artifact_path: pilot-tightening-torque.json
+    artifact_sha256: dae2043bc142ad6bb984e296d2cff21f6a93ccba49f1e42c02ca26b6e413d014
+    profile_config_sha256: 43c9a68832b2030051dca0a320c13bc526b8ae58d810bc0e44052872d836cac8
+  - kind: repeat-last
+    model_profile_id: pilot-compressor-pressure
+    model_info_id: pilot-fixture-v1-compressor-pressure
+    meas_code: discharge_pressure
+    unit: MPa
+    value_scale: 3
+    sampling_frequency: 1min
+    request_window_points: 66
+    context_points: 60
+    horizon_points: 15
+    preprocessing_version: pdm-v2-pilot-1
+    artifact_path: pilot-compressor-pressure.json
+    artifact_sha256: 5e2959d7617adb4fad4da45702bbef75f11832f8f7f9818c7f2e662e83bccf38
+    profile_config_sha256: 6c955b29105ce34724dac26280ee2ff3f428e55c5e5269f40c6e32860ccfa1e8
+  - kind: repeat-last
+    model_profile_id: pilot-eol-pass-rate
+    model_info_id: pilot-fixture-v1-eol-pass-rate
+    meas_code: pass_rate
+    unit: "%"
+    value_scale: 2
+    sampling_frequency: 1min
+    request_window_points: 66
+    context_points: 60
+    horizon_points: 15
+    preprocessing_version: pdm-v2-pilot-1
+    artifact_path: pilot-eol-pass-rate.json
+    artifact_sha256: 5fe0b2a40d796cbbd5e42d67cce20d195c2c67a75795cc9f4390848f1c119377
+    profile_config_sha256: 61f0d0323b511999351203cc0017e5c9cd5e646fa7366a3616607c01b781650b

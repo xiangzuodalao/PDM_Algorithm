@@ -1,9 +1,8 @@
-# 使用官方轻量级 Python 镜像
-# FROM python:3.12-slim
-FROM ubuntu:24.04
+# 外部镜像摘要已在 Linux/amd64 本地构建中验证；其他架构需单独验证并更新摘要。
+FROM docker.io/library/ubuntu@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
 
 # 从官方镜像中直接复制已编译好的 uv 二进制文件
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv@sha256:df4cae8f3a96d175e2e5f992e597550000edbe78fdc2594d5cd8de1a217f504c /uv /uvx /bin/
 
 # 设置环境变量
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -18,10 +17,10 @@ WORKDIR /app
 RUN sed -i 's/deb.ubuntu.org/mirrors.tsinghua.com/g' /etc/apt/sources.list && \
     sed -i 's/security.ubuntu.org/mirrors.tsinghua.com/g' /etc/apt/sources.list && \
     apt-get update && \
-    (sed -i 's/deb.debian.org/mirrors.tsinghua.com/g' /etc/apt/sources.list.d/debian.sources 2>dev/null || true) && \
-    (sed -i 's/security.debian.org/mirrors.tsinghua.com/g' /etc/apt/sources.list.d/debian.sources 2>dev/null || true) && \
-    (sed -i 's/deb.debian.org/mirrors.tsinghua.com/g' /etc/apt/sources.list 2>dev/null || true) && \
-    (sed -i 's/security.debian.org/mirrors.tsinghua.com/g' /etc/apt/sources.list 2>dev/null || true) && \
+    (sed -i 's/deb.debian.org/mirrors.tsinghua.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true) && \
+    (sed -i 's/security.debian.org/mirrors.tsinghua.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true) && \
+    (sed -i 's/deb.debian.org/mirrors.tsinghua.com/g' /etc/apt/sources.list 2>/dev/null || true) && \
+    (sed -i 's/security.debian.org/mirrors.tsinghua.com/g' /etc/apt/sources.list 2>/dev/null || true) && \
     apt-get install -y --no-install-recommends \
     python3.12 \
     ca-certificates \
@@ -46,32 +45,21 @@ RUN mkdir -p /usr/share/keyrings && \
 RUN apt-get update && apt-get install -y odbc-postgresql \
     && apt-get clean
 
-# 优先复制依赖文件以利用 Docker 缓存层
-COPY pyproject.toml uv.lock ./
+# Copy the application only after system dependencies are ready. .dockerignore
+# excludes virtual environments, secrets, data, artifacts, and local integrations.
+COPY . /app
 
-# 挂载 uv 缓存加速构建，并同步依赖包 (不安装项目自身的代码和开发依赖)
+# The frozen uv lock selects the explicit PyTorch CPU index from pyproject.toml.
 RUN --mount=type=cache,target=/root/.cache/uv \
     UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
     UV_HTTP_TIMEOUT=120 \
-    uv sync --frozen --no-install-project --no-dev --python 3.12
-
-
-# 复制项目所有代码
-COPY . /app
-
-# 再次执行 sync，安装项目本身
-RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --python 3.12
 
 
-
-
-RUN uv pip install torch torchvision --index-url  https://download.pytorch.org/whl/cu128 --no-cache
-
-
-# 创建非特权用户，并将 /app 目录的所有权赋给它，避免权限问题
+# 创建非特权用户。代码与虚拟环境保持只读，仅预建运行时可写目录；
+# 避免递归 chown 复制整套 PyTorch 环境形成巨大的镜像层。
 RUN useradd -m -u 10001 appuser \
-    && chown -R appuser:appuser /app
+    && install -d -o appuser -g appuser /app/artifacts /app/data
 
 # 切换到非特权用户
 USER appuser
@@ -84,4 +72,4 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:10021/healthz').read()" || exit 1
 
 # 启动命令 (此时系统能直接识别 uvicorn)
-CMD ["uvicorn", "valeo_pdm.api.app:app", "--host", "0.0.0.0", "--port", "10021", "--workers", "2"]
+CMD ["uvicorn", "valeo_pdm.api.app:app", "--host", "0.0.0.0", "--port", "10021", "--workers", "1"]

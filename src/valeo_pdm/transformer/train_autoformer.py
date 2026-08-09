@@ -10,8 +10,13 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
-from valeo_pdm.db.data_reader import load_postgres_timeseries, load_sqlserver_timeseries
-from valeo_pdm.transformer.data import load_series, make_windows, normalize_train_mean_std, split_train_val_test
+from valeo_pdm.transformer.data import (
+    clean_and_resample_timeseries,
+    make_windows,
+    normalize_train_mean_std,
+    require_usable_window_splits,
+    split_train_val_test,
+)
 from valeo_pdm.transformer.models.autoformer import Autoformer
 
 
@@ -21,49 +26,16 @@ def set_seed(seed: int = 42):
     torch.cuda.manual_seed_all(seed)
 
 
-def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    cols = {c.lower(): c for c in df.columns}
-    rename_map = {}
-    if "collect_time" in cols:
-        rename_map[cols["collect_time"]] = "collect_time"
-    elif "timestamp" in cols:
-        rename_map[cols["timestamp"]] = "collect_time"
-    if "value" in cols:
-        rename_map[cols["value"]] = "value"
-    if "meas_code" in cols:
-        rename_map[cols["meas_code"]] = "meas_code"
-    if "equipment_code" in cols:
-        rename_map[cols["equipment_code"]] = "equipment_code"
-    return df.rename(columns=rename_map)
-
-
-def parse_time(df: pd.DataFrame) -> pd.DataFrame:
-    df["collect_time"] = pd.to_datetime(df["collect_time"], errors="coerce")
-    df = df.dropna(subset=["collect_time"])
-    return df
-
-
-def resample_group(df: pd.DataFrame, freq: str) -> pd.DataFrame:
-    df["value"] = pd.to_numeric(df["value"], errors="coerce")
-    df = df.dropna(subset=["value"])
-    df = df.sort_values("collect_time")
-    bins = df["collect_time"].dt.floor(freq)
-    agg = (
-        pd.DataFrame({"bin": bins, "value": df["value"]})
-        .groupby("bin", as_index=True)["value"]
-        .mean()
-        .sort_index()
-    )
-    agg.index.name = "collect_time"
-    return agg.to_frame()
-
-
 def build_dataloaders(
-    values: np.ndarray, seq_len: int, label_len: int, pred_len: int, batch_size: int, stride: int = 96
+    values: np.ndarray,
+    seq_len: int,
+    label_len: int,
+    pred_len: int,
+    batch_size: int,
+    stride: int = 1,
 ) -> Tuple[DataLoader, DataLoader, DataLoader, float, float]:
+    require_usable_window_splits(len(values), seq_len, label_len, pred_len, stride)
     X, Y = make_windows(values, seq_len, label_len, pred_len, step=stride)
-    if len(X) == 0:
-        raise ValueError("样本数量为0，请检查序列长度与窗口参数。")
     train_idx, val_idx, test_idx = split_train_val_test(len(X))
     X_norm, mean, std = normalize_train_mean_std(X[train_idx], X)
     Y_norm = (Y - mean) / std
@@ -91,7 +63,9 @@ def train_one_epoch(
     crit = nn.MSELoss()
     total_loss = 0.0
     n = 0
-    iterator = tqdm(loader, desc=f"Epoch {epoch}/{total_epochs}", leave=False) if show_progress else loader
+    iterator = (
+        tqdm(loader, desc=f"Epoch {epoch}/{total_epochs}", leave=False) if show_progress else loader
+    )
     for x, y in iterator:
         x = x.to(device)
         y = y.to(device)
@@ -153,29 +127,24 @@ def do_training(
     lr_patience: int,
     weight_decay: float,
     grad_clip: float,
+    stride: int = 1,
 ):
     os.makedirs(save, exist_ok=True)
     set_seed(42)
 
-    if source == "csv":
-        values = load_series(data)
-    elif source == "sqlsever":
-        df = load_sqlserver_timeseries(config, equipment_code, meas_code, days_back=days_back)
-        df = normalize_columns(df)
-        df = parse_time(df)
-        gdf = df[df["meas_code"] == meas_code] if "meas_code" in df.columns else df
-        series_df = resample_group(gdf, freq=freq)
-        values = pd.to_numeric(series_df["value"], errors="coerce").dropna().to_numpy(dtype=np.float32)
-    else:
-        df = load_postgres_timeseries(config, equipment_code, meas_code, days_back=days_back)
-        df = normalize_columns(df)
-        df = parse_time(df)
-        gdf = df[df["meas_code"] == meas_code] if "meas_code" in df.columns else df
-        series_df = resample_group(gdf, freq=freq)
-        values = pd.to_numeric(series_df["value"], errors="coerce").dropna().to_numpy(dtype=np.float32)
+    if source != "csv":
+        raise ValueError("Autoformer 目前仅支持 CSV 数据源")
+    df = pd.read_csv(data)
+    series_df, _quality = clean_and_resample_timeseries(
+        df,
+        freq,
+        equipment_code=equipment_code,
+        meas_code=meas_code,
+    )
+    values = series_df["value"].to_numpy(dtype=np.float32)
 
     train_loader, val_loader, test_loader, mean, std = build_dataloaders(
-        values, seq_len, label_len, pred_len, batch_size, stride=max(96, pred_len // 7)
+        values, seq_len, label_len, pred_len, batch_size, stride=stride
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = Autoformer(
@@ -193,7 +162,9 @@ def do_training(
 
     optim = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = (
-        torch.optim.lr_scheduler.ReduceLROnPlateau(optim, mode="min", factor=lr_factor, patience=lr_patience)
+        torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optim, mode="min", factor=lr_factor, patience=lr_patience
+        )
         if lr_sched
         else None
     )
@@ -204,7 +175,14 @@ def do_training(
     val_losses: list[float] = []
     for epoch in range(1, epochs + 1):
         train_loss = train_one_epoch(
-            model, train_loader, optim, device, grad_clip=grad_clip, show_progress=True, epoch=epoch, total_epochs=epochs
+            model,
+            train_loader,
+            optim,
+            device,
+            grad_clip=grad_clip,
+            show_progress=True,
+            epoch=epoch,
+            total_epochs=epochs,
         )
         val_loss = evaluate(model, val_loader, device)
         train_losses.append(float(train_loss))

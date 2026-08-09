@@ -11,4 +11,9 @@ __pycache__
 artifacts
 data
 configs/postgres_config.json
+configs/sqlserver_config.json
+configs/app_config.json
 
+# MCP 与 Codex 扩展使用独立运行环境，不进入算法服务镜像
+integrations
+.agents

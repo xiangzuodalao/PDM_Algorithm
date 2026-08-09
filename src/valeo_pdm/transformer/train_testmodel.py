@@ -4,15 +4,18 @@ import os
 from typing import Tuple
 
 import numpy as np
-import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
-from valeo_pdm.db.data_reader import load_postgres_timeseries
-from valeo_pdm.transformer.data import load_series, make_windows, normalize_train_mean_std, split_train_val_test
-from valeo_pdm.transformer.train_informer import normalize_columns, parse_time, resample_group
+from valeo_pdm.transformer.data import (
+    clean_and_resample_timeseries,
+    load_series,
+    make_windows,
+    normalize_train_mean_std,
+    split_train_val_test,
+)
 
 
 def set_seed(seed: int = 42):
@@ -24,10 +27,16 @@ def set_seed(seed: int = 42):
 class SimpleGRUForecast(nn.Module):
     """A lightweight GRU forecaster used to simulate an independent model pipeline."""
 
-    def __init__(self, seq_len: int, pred_len: int, hidden_size: int, num_layers: int, dropout: float):
+    def __init__(
+        self, seq_len: int, pred_len: int, hidden_size: int, num_layers: int, dropout: float
+    ):
         super().__init__()
         self.gru = nn.GRU(
-            input_size=1, hidden_size=hidden_size, num_layers=num_layers, dropout=dropout if num_layers > 1 else 0.0, batch_first=True
+            input_size=1,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            dropout=dropout if num_layers > 1 else 0.0,
+            batch_first=True,
         )
         self.proj = nn.Linear(hidden_size, pred_len)
 
@@ -39,7 +48,12 @@ class SimpleGRUForecast(nn.Module):
 
 
 def build_dataloaders(
-    values: np.ndarray, seq_len: int, label_len: int, pred_len: int, batch_size: int, stride: int = 12
+    values: np.ndarray,
+    seq_len: int,
+    label_len: int,
+    pred_len: int,
+    batch_size: int,
+    stride: int = 12,
 ) -> Tuple[DataLoader, DataLoader, DataLoader, float, float]:
     X, Y = make_windows(values, seq_len, label_len, pred_len, step=stride)
     if len(X) == 0:
@@ -71,7 +85,9 @@ def train_one_epoch(
     crit = nn.MSELoss()
     total_loss = 0.0
     n = 0
-    iterator = tqdm(loader, desc=f"Epoch {epoch}/{total_epochs}", leave=False) if show_progress else loader
+    iterator = (
+        tqdm(loader, desc=f"Epoch {epoch}/{total_epochs}", leave=False) if show_progress else loader
+    )
     for x, y in iterator:
         x = x.to(device)
         y = y.to(device)
@@ -142,24 +158,34 @@ def do_training(
     if source == "csv":
         values = load_series(data)
     else:
+        from valeo_pdm.db.data_reader import load_postgres_timeseries
+
         df = load_postgres_timeseries(config, equipment_code, meas_code, days_back=days_back)
-        df = normalize_columns(df)
-        df = parse_time(df)
-        gdf = df[df["meas_code"] == meas_code] if "meas_code" in df.columns else df
-        series_df = resample_group(gdf, freq=freq)
-        values = pd.to_numeric(series_df["value"], errors="coerce").dropna().to_numpy(dtype=np.float32)
+        series_df, _quality = clean_and_resample_timeseries(
+            df,
+            freq,
+            equipment_code=equipment_code,
+            meas_code=meas_code,
+        )
+        values = series_df["value"].to_numpy(dtype=np.float32)
 
     train_loader, val_loader, test_loader, mean, std = build_dataloaders(
         values, seq_len, label_len, pred_len, batch_size, stride=stride
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = SimpleGRUForecast(seq_len=seq_len, pred_len=pred_len, hidden_size=d_model, num_layers=e_layers, dropout=dropout).to(
-        device
-    )
+    model = SimpleGRUForecast(
+        seq_len=seq_len,
+        pred_len=pred_len,
+        hidden_size=d_model,
+        num_layers=e_layers,
+        dropout=dropout,
+    ).to(device)
 
     optim = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = (
-        torch.optim.lr_scheduler.ReduceLROnPlateau(optim, mode="min", factor=lr_factor, patience=lr_patience)
+        torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optim, mode="min", factor=lr_factor, patience=lr_patience
+        )
         if lr_sched
         else None
     )
@@ -170,7 +196,14 @@ def do_training(
     val_losses: list[float] = []
     for epoch in range(1, epochs + 1):
         train_loss = train_one_epoch(
-            model, train_loader, optim, device, grad_clip=grad_clip, show_progress=True, epoch=epoch, total_epochs=epochs
+            model,
+            train_loader,
+            optim,
+            device,
+            grad_clip=grad_clip,
+            show_progress=True,
+            epoch=epoch,
+            total_epochs=epochs,
         )
         val_loss = evaluate(model, val_loader, device)
         train_losses.append(float(train_loss))

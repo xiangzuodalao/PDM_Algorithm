@@ -1,0 +1,19 @@
+# Test registry: unrelated comments and fields must survive onboarding.
+models:
+  KEEP-EQ:
+    KEEP-MEAS:
+      model_type: informer
+      freq: 1h
+      days_back: 30
+      source: db
+      keep_marker: untouched
+      train_params:
+        seq_len: 4
+        label_len: 2
+        pred_len: 2
+
+defaults:
+  model_type: informer
+  freq: 1h
+  days_back: 7
+  source: db

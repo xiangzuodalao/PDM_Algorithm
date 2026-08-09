@@ -1,0 +1,11 @@
+equipment_code: CSV-NEW
+meas_code: TEMP
+config:
+  model_type: autoformer
+  source: csv
+  freq: 1h
+  data_path: tests/fixtures/onboard_scenario/csv_timeseries.csv
+  train_params:
+    seq_len: 4
+    label_len: 2
+    pred_len: 2

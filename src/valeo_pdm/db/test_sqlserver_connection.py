@@ -22,7 +22,7 @@ def run_probe(cfg: SqlServerStatusConfig, model_info_id: str | None) -> int:
         print(f"[ERROR] 无法导入 pyodbc：{e}")
         return 1
 
-    print(f"[INFO] 正在连接 SQL Server，连接串: {cfg.conn_str}")
+    print("[INFO] 正在连接 SQL Server（连接信息已隐藏）")
     with pyodbc.connect(cfg.conn_str, autocommit=True) as conn:
         print(f"[INFO] 连接成功，驱动: {conn.getinfo(pyodbc.SQL_DRIVER_NAME)}")
         with conn.cursor() as cursor:

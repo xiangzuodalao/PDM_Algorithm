@@ -1,0 +1,36 @@
+services:
+  pdm-mcp-smoke-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: valeo-pdm:mcp-smoke
+    ports:
+      - "127.0.0.1:10022:10021"
+    environment:
+      VALEO_PDM_ROOT: /app
+      VALEO_PDM_REQUIRE_TRAIN_PLAN_HASH: "1"
+      CUDA_VISIBLE_DEVICES: ""
+    volumes:
+      - ./src:/app/src:ro
+      - ./data:/app/data:ro
+    tmpfs:
+      - /app/artifacts:uid=10001,gid=10001,mode=0755
+    command:
+      - uvicorn
+      - valeo_pdm.api.app:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "10021"
+      - --workers
+      - "1"
+    restart: "no"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:10021/healthz').read()
+      interval: 5s
+      timeout: 3s
+      retries: 12
