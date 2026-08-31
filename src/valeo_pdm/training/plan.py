@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import math
 import re
@@ -162,16 +163,85 @@ class TrainingPlan:
             "output_policy": {"exclusive_new_directory": True},
         }
 
-    @property
-    def plan_hash(self) -> str:
-        canonical = json.dumps(
+    def to_json(self) -> str:
+        return json.dumps(
             self.as_dict(),
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
             allow_nan=False,
         )
-        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    @property
+    def plan_hash(self) -> str:
+        return hashlib.sha256(self.to_json().encode("utf-8")).hexdigest()
+
+    @classmethod
+    def from_dict(
+        cls,
+        payload: Mapping[str, Any],
+        *,
+        expected_hash: str | None = None,
+    ) -> TrainingPlan:
+        """恢复提交时冻结的训练计划，并重新执行参数及哈希校验。"""
+
+        try:
+            if payload.get("version") != PLAN_VERSION:
+                raise ValueError("unsupported plan version")
+            train_params = payload["train_params"]
+            if not isinstance(train_params, Mapping):
+                raise TypeError("train_params must be a mapping")
+            plan = build_training_plan(
+                equipment_code=str(payload["equipment_code"]),
+                meas_code=str(payload["meas_code"]),
+                model_info_id=str(payload["model_info_id"]),
+                requested_model_type=str(payload["model_type"]),
+                param_items=(),
+                requested_source=str(payload["source"]),
+                execution_mode=str(payload["execution_mode"]),
+                model_config={
+                    "model_type": payload["model_type"],
+                    "source": payload["source"],
+                    "freq": payload["freq"],
+                    "days_back": payload["days_back"],
+                    "data_path": payload["data_path"],
+                    "train_params": dict(train_params),
+                },
+            )
+        except TrainingPlanError:
+            raise
+        except (KeyError, TypeError, ValueError) as exc:
+            raise TrainingPlanError(
+                "持久化训练计划无效",
+                status_code=500,
+                code="INVALID_STORED_PLAN",
+            ) from exc
+
+        if expected_hash and not hmac.compare_digest(plan.plan_hash, expected_hash):
+            raise TrainingPlanError(
+                "持久化训练计划哈希不匹配",
+                status_code=500,
+                code="INVALID_STORED_PLAN",
+            )
+        return plan
+
+    @classmethod
+    def from_json(cls, payload: str, *, expected_hash: str | None = None) -> TrainingPlan:
+        try:
+            data = json.loads(payload)
+        except (TypeError, ValueError) as exc:
+            raise TrainingPlanError(
+                "持久化训练计划无效",
+                status_code=500,
+                code="INVALID_STORED_PLAN",
+            ) from exc
+        if not isinstance(data, Mapping):
+            raise TrainingPlanError(
+                "持久化训练计划无效",
+                status_code=500,
+                code="INVALID_STORED_PLAN",
+            )
+        return cls.from_dict(data, expected_hash=expected_hash)
 
 
 def _parse_bool(raw: Any) -> bool:

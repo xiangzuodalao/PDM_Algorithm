@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +12,12 @@ from fastapi.testclient import TestClient
 
 from valeo_pdm.api import router as api_router
 from valeo_pdm.api.app import app
-from valeo_pdm.training import from_config, run_control
+from valeo_pdm.db.training_jobs import (
+    TrainingJob,
+    TrainingJobConflict,
+    TrainingJobStoreError,
+)
+from valeo_pdm.training import execution, from_config, run_control, tasks
 from valeo_pdm.training.plan import TrainingPlanError, build_training_plan
 from valeo_pdm.training.run_control import (
     create_training_run,
@@ -43,6 +50,85 @@ BASE_CONFIG: dict[str, Any] = {
         "d_layers": 1,
     },
 }
+
+
+class FakeJobRepository:
+    def __init__(self):
+        self.jobs: dict[str, TrainingJob] = {}
+        self.identities: dict[tuple[str, str, str], str] = {}
+        self.enqueued: list[str] = []
+
+    def create_queued(self, job_id: str, plan) -> TrainingJob:
+        identity = (plan.equipment_code, plan.meas_code, plan.model_info_id)
+        if identity in self.identities:
+            raise TrainingJobConflict("duplicate")
+        job = TrainingJob(
+            job_id=job_id,
+            equipment_code=plan.equipment_code,
+            meas_code=plan.meas_code,
+            model_info_id=plan.model_info_id,
+            model_type=plan.model_type,
+            plan_json=plan.to_json(),
+            plan_hash=plan.plan_hash,
+            status="QUEUED",
+            error_code=None,
+            best_val=None,
+            test_loss=None,
+            created_at=datetime.now(UTC),
+            started_at=None,
+            finished_at=None,
+        )
+        self.jobs[job_id] = job
+        self.identities[identity] = job_id
+        return job
+
+    def get(self, job_id: str) -> TrainingJob | None:
+        return self.jobs.get(job_id)
+
+    def get_by_identity(
+        self, equipment_code: str, meas_code: str, model_info_id: str
+    ) -> TrainingJob | None:
+        job_id = self.identities.get((equipment_code, meas_code, model_info_id))
+        return self.jobs.get(job_id) if job_id else None
+
+    def claim(self, job_id: str) -> TrainingJob | None:
+        job = self.jobs.get(job_id)
+        if job is None or job.status != "QUEUED":
+            return None
+        claimed = replace(job, status="RUNNING", started_at=datetime.now(UTC))
+        self.jobs[job_id] = claimed
+        return claimed
+
+    def mark_succeeded(
+        self, job_id: str, *, best_val: float | None, test_loss: float | None
+    ) -> None:
+        job = self.jobs[job_id]
+        assert job.status == "RUNNING"
+        self.jobs[job_id] = replace(
+            job,
+            status="SUCCEEDED",
+            best_val=best_val,
+            test_loss=test_loss,
+            finished_at=datetime.now(UTC),
+        )
+
+    def mark_failed(self, job_id: str, *, error_code: str) -> None:
+        job = self.jobs[job_id]
+        assert job.status == "RUNNING"
+        self.jobs[job_id] = replace(
+            job,
+            status="FAILED",
+            error_code=error_code,
+            finished_at=datetime.now(UTC),
+        )
+
+    def delete_queued(self, job_id: str) -> bool:
+        job = self.jobs.get(job_id)
+        if job is None or job.status != "QUEUED":
+            return False
+        self.jobs.pop(job_id)
+        self.identities.pop((job.equipment_code, job.meas_code, job.model_info_id))
+        return True
 
 
 def _request(
@@ -87,9 +173,13 @@ def _successful_trainer_result(
 @pytest.fixture
 def isolated_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     config = deepcopy(BASE_CONFIG)
+    repository = FakeJobRepository()
     monkeypatch.setenv("VALEO_PDM_ROOT", str(tmp_path))
     monkeypatch.delenv("VALEO_PDM_REQUIRE_TRAIN_PLAN_HASH", raising=False)
     monkeypatch.setattr(api_router, "get_model_config", lambda *_args: deepcopy(config))
+    monkeypatch.setattr(api_router, "_training_job_repository", lambda: repository)
+    monkeypatch.setattr(api_router, "_enqueue_training_job", repository.enqueued.append)
+    monkeypatch.setattr(tasks, "_job_repository", lambda: repository)
     with TestClient(app) as client:
         yield client, config, tmp_path
 
@@ -211,7 +301,7 @@ def test_csv_paths_cannot_escape_data_directory(
     assert "超出 data" in response.json()["detail"]
 
 
-def test_local_only_train_uses_confirmed_hash_and_status_manifest(
+def test_local_only_train_is_queued_then_worker_uses_confirmed_plan(
     isolated_api, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client, _config, root = isolated_api
@@ -226,14 +316,14 @@ def test_local_only_train_uses_confirmed_hash_and_status_manifest(
             plots={"forecast": "/must/not/upload.png"},
         )
 
-    monkeypatch.setattr(api_router, "get_trainer", lambda _model_type: trainer)
+    monkeypatch.setattr(execution, "get_trainer", lambda _model_type: trainer)
     monkeypatch.setattr(
-        api_router.SqlServerTrainStatusUpdater,
+        execution.SqlServerTrainStatusUpdater,
         "from_json",
         lambda *_args, **_kwargs: pytest.fail("local_only 不应初始化 SQL 状态回写"),
     )
     monkeypatch.setattr(
-        api_router,
+        execution,
         "upload_forecast_image",
         lambda *_args, **_kwargs: pytest.fail("local_only 不应上传图片"),
     )
@@ -243,10 +333,26 @@ def test_local_only_train_uses_confirmed_hash_and_status_manifest(
     payload["ExpectedPlanHash"] = preview["plan_hash"]
     response = client.post("/measPredict/train", json=payload)
 
-    assert response.status_code == 200
+    assert response.status_code == 202
     body = response.json()
     assert body["plan_hash"] == preview["plan_hash"]
-    assert body["status"] == "succeeded"
+    assert body["status"] == "QUEUED"
+    assert api_router._training_job_repository().enqueued == [body["job_id"]]
+    assert calls == []
+    assert not (root / "artifacts").exists()
+    queued_status = client.get(
+        "/measPredict/train/status",
+        params={
+            "EquipmentCode": "EQ-1",
+            "MeasCode": "MEAS-1",
+            "ModelInfoID": "mcp-train-1",
+        },
+    )
+    assert queued_status.json()["status"] == "QUEUED"
+
+    task_result = tasks.train_model.run(body["job_id"])
+
+    assert task_result["status"] == "SUCCEEDED"
     assert len(calls) == 1
     assert calls[0]["epochs"] == 2
     run_dir = root / "artifacts" / "checkpoints" / "exp_EQ-1_MEAS-1_informer" / "mcp-train-1"
@@ -263,11 +369,78 @@ def test_local_only_train_uses_confirmed_hash_and_status_manifest(
         },
     )
     assert status.status_code == 200
-    assert status.json()["status"] == "succeeded"
+    assert status.json()["status"] == "SUCCEEDED"
+    assert status.json()["job_id"] == body["job_id"]
     assert "run_dir" not in status.json()
+
+    duplicate_task = tasks.train_model.run(body["job_id"])
+    assert duplicate_task == {"job_id": body["job_id"], "executed": False}
+    assert len(calls) == 1
 
     conflict = client.post("/measPredict/train", json=payload)
     assert conflict.status_code == 409
+
+
+def test_enqueue_failure_removes_queued_job_and_returns_503(
+    isolated_api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _config, _root = isolated_api
+    repository = api_router._training_job_repository()
+    monkeypatch.setattr(
+        api_router,
+        "_enqueue_training_job",
+        lambda _job_id: (_ for _ in ()).throw(ConnectionError("redis unavailable")),
+    )
+
+    response = client.post("/measPredict/train", json=_request("queue-down-1"))
+
+    assert response.status_code == 503
+    assert response.headers["X-PDM-Error-Code"] == "TRAINING_QUEUE_UNAVAILABLE"
+    assert repository.jobs == {}
+
+
+def test_job_store_failure_returns_503(isolated_api, monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _config, _root = isolated_api
+    monkeypatch.setattr(
+        api_router,
+        "_training_job_repository",
+        lambda: (_ for _ in ()).throw(TrainingJobStoreError("sql unavailable")),
+    )
+
+    response = client.post("/measPredict/train", json=_request("sql-down-1"))
+
+    assert response.status_code == 503
+    assert response.headers["X-PDM-Error-Code"] == "TRAINING_JOB_STORE_UNAVAILABLE"
+
+
+def test_status_falls_back_to_legacy_manifest_with_public_status(isolated_api) -> None:
+    client, _config, _root = isolated_api
+    plan = build_training_plan(
+        equipment_code="EQ-1",
+        meas_code="MEAS-1",
+        model_info_id="legacy-manifest-1",
+        requested_model_type="informer",
+        param_items=[],
+        requested_source="db",
+        execution_mode="local_only",
+        model_config=BASE_CONFIG,
+    )
+    with training_run_lock(plan):
+        run_dir = create_training_run(plan)
+        update_manifest(run_dir, status="succeeded", best_val=0.1, test_loss=0.2)
+
+    response = client.get(
+        "/measPredict/train/status",
+        params={
+            "EquipmentCode": "EQ-1",
+            "MeasCode": "MEAS-1",
+            "ModelInfoID": "legacy-manifest-1",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["job_id"] is None
+    assert response.json()["status"] == "SUCCEEDED"
 
 
 def test_hash_drift_and_required_hash_fail_before_creating_run_dir(
@@ -291,10 +464,10 @@ def test_hash_drift_and_required_hash_fail_before_creating_run_dir(
     ).exists()
 
 
-def test_hash_is_rechecked_under_lock_before_directory_creation(
+def test_submitted_plan_is_frozen_and_worker_does_not_reread_config(
     isolated_api, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client, _config, root = isolated_api
+    client, _config, _root = isolated_api
     payload = _request("locked-hash-1")
     expected = client.post("/measPredict/train/preview", json=payload).json()["plan_hash"]
     original = deepcopy(BASE_CONFIG)
@@ -310,11 +483,36 @@ def test_hash_is_rechecked_under_lock_before_directory_creation(
     monkeypatch.setattr(api_router, "get_model_config", changing_config)
     payload["ExpectedPlanHash"] = expected
     response = client.post("/measPredict/train", json=payload)
-    assert response.status_code == 409
-    assert calls == 2
-    assert not (
-        root / "artifacts" / "checkpoints" / "exp_EQ-1_MEAS-1_informer" / "locked-hash-1"
-    ).exists()
+    assert response.status_code == 202
+    assert calls == 1
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        execution,
+        "get_trainer",
+        lambda _model_type: lambda **kwargs: captured.update(kwargs)
+        or _successful_trainer_result(kwargs),
+    )
+    tasks.train_model.run(response.json()["job_id"])
+
+    assert calls == 1
+    assert captured["epochs"] == 2
+
+
+def test_worker_rejects_tampered_persisted_plan_hash(isolated_api) -> None:
+    client, _config, root = isolated_api
+    response = client.post("/measPredict/train", json=_request("tampered-plan-1"))
+    job_id = response.json()["job_id"]
+    repository = api_router._training_job_repository()
+    repository.jobs[job_id] = replace(repository.jobs[job_id], plan_hash="0" * 64)
+
+    with pytest.raises(TrainingPlanError) as caught:
+        tasks.train_model.run(job_id)
+
+    assert caught.value.code == "INVALID_STORED_PLAN"
+    assert repository.jobs[job_id].status == "FAILED"
+    assert repository.jobs[job_id].error_code == "INVALID_STORED_PLAN"
+    assert not (root / "artifacts").exists()
 
 
 def test_failed_training_is_manifested_without_leaking_internal_error(
@@ -325,15 +523,17 @@ def test_failed_training_is_manifested_without_leaking_internal_error(
     def fail_trainer(**_kwargs: Any) -> dict[str, Any]:
         raise RuntimeError("secret connection string")
 
-    monkeypatch.setattr(api_router, "get_trainer", lambda _model_type: fail_trainer)
+    monkeypatch.setattr(execution, "get_trainer", lambda _model_type: fail_trainer)
     payload = _request("failed-1")
     payload["ExpectedPlanHash"] = client.post("/measPredict/train/preview", json=payload).json()[
         "plan_hash"
     ]
     response = client.post("/measPredict/train", json=payload)
-    assert response.status_code == 500
-    assert response.json()["detail"] == "训练执行失败"
+    assert response.status_code == 202
     assert "secret" not in response.text
+
+    with pytest.raises(RuntimeError, match="secret connection string"):
+        tasks.train_model.run(response.json()["job_id"])
 
     status = client.get(
         "/measPredict/train/status",
@@ -344,7 +544,7 @@ def test_failed_training_is_manifested_without_leaking_internal_error(
         },
     )
     assert status.status_code == 200
-    assert status.json()["status"] == "failed"
+    assert status.json()["status"] == "FAILED"
     assert status.json()["error_code"] == "TRAINING_FAILED"
 
 
@@ -353,7 +553,7 @@ def test_missing_checkpoint_marks_training_failed(
 ) -> None:
     client, _config, _root = isolated_api
     monkeypatch.setattr(
-        api_router,
+        execution,
         "get_trainer",
         lambda _model_type: lambda **_kwargs: {"best_val": 0.1, "test_loss": 0.2},
     )
@@ -362,7 +562,9 @@ def test_missing_checkpoint_marks_training_failed(
         "plan_hash"
     ]
     response = client.post("/measPredict/train", json=payload)
-    assert response.status_code == 500
+    assert response.status_code == 202
+    with pytest.raises(RuntimeError, match="best_path"):
+        tasks.train_model.run(response.json()["job_id"])
     status = client.get(
         "/measPredict/train/status",
         params={
@@ -371,7 +573,7 @@ def test_missing_checkpoint_marks_training_failed(
             "ModelInfoID": "missing-checkpoint-1",
         },
     )
-    assert status.json()["status"] == "failed"
+    assert status.json()["status"] == "FAILED"
 
 
 def test_predict_rejects_model_info_id_path_traversal(isolated_api) -> None:
@@ -399,9 +601,7 @@ def test_predict_dispatches_resolved_checkpoint(
         checkpoint = resolve_checkpoint_path("EQ-1", "MEAS-1", "informer")
     else:
         checkpoint = (
-            training_output_dir("EQ-1", "MEAS-1", "informer")
-            / model_info_id
-            / "informer_best.pt"
+            training_output_dir("EQ-1", "MEAS-1", "informer") / model_info_id / "informer_best.pt"
         )
     checkpoint.parent.mkdir(parents=True, exist_ok=True)
     checkpoint.write_bytes(b"checkpoint")
@@ -452,17 +652,17 @@ def test_platform_mode_keeps_status_and_forecast_upload_behavior(
             events.append("failed")
 
     monkeypatch.setattr(
-        api_router.SqlServerTrainStatusUpdater,
+        execution.SqlServerTrainStatusUpdater,
         "from_json",
         lambda *_args, **_kwargs: StatusUpdater(),
     )
     monkeypatch.setattr(
-        api_router,
+        execution,
         "upload_forecast_image",
         lambda path: events.append(f"upload:{path}") or "[]",
     )
     monkeypatch.setattr(
-        api_router,
+        execution,
         "get_trainer",
         lambda _model_type: lambda **kwargs: _successful_trainer_result(
             kwargs, plots={"forecast": "/tmp/forecast.png"}
@@ -473,7 +673,9 @@ def test_platform_mode_keeps_status_and_forecast_upload_behavior(
     assert preview["plan"]["side_effects"]["sql_status_updates"] is True
     payload["ExpectedPlanHash"] = preview["plan_hash"]
     response = client.post("/measPredict/train", json=payload)
-    assert response.status_code == 200
+    assert response.status_code == 202
+    assert events == []
+    tasks.train_model.run(response.json()["job_id"])
     assert events == ["running", "upload:/tmp/forecast.png", "success"]
 
 
@@ -482,20 +684,21 @@ def test_legacy_platform_request_without_hash_remains_compatible(
 ) -> None:
     client, _config, _root = isolated_api
     monkeypatch.setattr(
-        api_router.SqlServerTrainStatusUpdater,
+        execution.SqlServerTrainStatusUpdater,
         "from_json",
         lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(
-        api_router,
+        execution,
         "get_trainer",
         lambda _model_type: lambda **kwargs: _successful_trainer_result(kwargs),
     )
     payload = _request("legacy-no-hash-1")
     payload.pop("ExecutionMode")
     response = client.post("/measPredict/train", json=payload)
-    assert response.status_code == 200
-    assert response.json()["status"] == "succeeded"
+    assert response.status_code == 202
+    assert response.json()["status"] == "QUEUED"
+    tasks.train_model.run(response.json()["job_id"])
 
 
 def test_autoformer_training_keeps_model_specific_arguments(
@@ -509,14 +712,15 @@ def test_autoformer_training_keeps_model_specific_arguments(
         captured.update(kwargs)
         return _successful_trainer_result(kwargs)
 
-    monkeypatch.setattr(api_router, "get_trainer", lambda _model_type: trainer)
+    monkeypatch.setattr(execution, "get_trainer", lambda _model_type: trainer)
     payload = _request("autoformer-1", source="csv")
     payload["ModelType"] = "autoformer"
     payload["ExpectedPlanHash"] = client.post("/measPredict/train/preview", json=payload).json()[
         "plan_hash"
     ]
     response = client.post("/measPredict/train", json=payload)
-    assert response.status_code == 200
+    assert response.status_code == 202
+    tasks.train_model.run(response.json()["job_id"])
     assert captured["source"] == "csv"
     assert captured["moving_avg"] == 25
     assert "distil_flag" not in captured

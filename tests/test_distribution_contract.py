@@ -169,6 +169,7 @@ def token_has_value(tokens: list[str], option: str, expected: str) -> bool:
 
 def test_runtime_dependencies_match_the_approved_cpu_contract() -> None:
     assert runtime_dependency_specifiers() == {
+        "celery": "celery[redis]==5.6.3",
         "fastapi": "fastapi==0.125.0",
         "filelock": "filelock==3.25.2",
         "httpx": "httpx==0.28.1",

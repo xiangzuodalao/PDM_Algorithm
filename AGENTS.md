@@ -4,7 +4,7 @@
 
 ## 项目概述
 
-IFactoryMom.PdM-Algorithm 是 Valeo 产线预测性维护(PdM)的时序预测系统。PyTorch 训练/推理 Informer 与 Autoformer(及 SimpleGRU),FastAPI 暴露训练/预测接口,数据源 PostgreSQL / SQL Server / CSV。Python 3.12 + uv。
+IFactoryMom.PdM-Algorithm 是 Valeo 产线预测性维护(PdM)的时序预测系统。PyTorch 训练/推理 Informer 与 Autoformer(及 SimpleGRU),FastAPI 暴露训练/预测接口,API 训练通过 Redis + Celery 异步执行,数据源 PostgreSQL / SQL Server / CSV。Python 3.12 + uv。
 
 ## 启动链与验证
 
@@ -30,6 +30,8 @@ uv run valeo-pdm list-models                 # -l / ls / list
 uv run valeo-pdm train -e <设备> -m <参数>    # --all / --model-type / --model-info-id / --sqlserver-config
 uv run valeo-pdm serve --host 0.0.0.0 --port 8000 --reload
 uv run uvicorn valeo_pdm.api.app:app --port 8000
+# GPU Worker 示例；三个 Worker 使用同一 training 队列并分别设置 CUDA_VISIBLE_DEVICES
+uv run --no-sync celery -A valeo_pdm.training.celery_app:app worker -Q training -n gpu0@%h --concurrency=1 --prefetch-multiplier=1
 # 默认 Compose 宿主端口是 127.0.0.1:10021；本地 CLI 默认端口仍为 8000
 
 # 测试(pyproject 默认 addopts 排除 integration_db)
@@ -45,7 +47,7 @@ uv run ruff format .
 入口:CLI `valeo-pdm` → `src/valeo_pdm/cli.py:main`(也可 `python -m valeo_pdm`);API → `src/valeo_pdm/api/app.py`。
 
 API 端点(前缀 `/measPredict`,**已无旧的 `/transformer` 段**,定义在 `api/router.py`):
-- `POST /measPredict/train`(`router.py:261`)、`POST /measPredict/predict`(`router.py:479`)
+- `POST /measPredict/train`（写入 QUEUED 后返回 202）、`POST /measPredict/predict`
 - `GET /measPredict/models`(`router.py:552`)、`POST /measPredict/checkData`(`router.py:573`)
 - `GET /healthz`(`app.py:27`)
 - `GET /readyz`：隔离 prediction v2 runtime 的字节与配置哈希就绪检查；`/healthz` 仍只检查进程。
@@ -68,6 +70,9 @@ src/valeo_pdm/
 ├─ training/
 │  ├─ registry.py         # TRAINER_IMPORTS 常量表 + get_trainer()
 │  ├─ entrypoints.py      # informer/autoformer 薄包装,延迟 import do_training(使探针无需 torch)
+│  ├─ celery_app.py       # Redis broker 与长任务 Celery 配置
+│  ├─ tasks.py            # Celery 训练任务,SQL 条件领取后调用 execution
+│  ├─ execution.py        # 冻结 TrainingPlan 的纯训练执行服务
 │  └─ from_config.py      # 配置驱动训练编排 + list_available_configs + _format_metrics_desc
 ├─ transformer/
 │  ├─ config.py           # 配置加载统一入口(YAML/DB)
@@ -79,12 +84,14 @@ src/valeo_pdm/
 │  ├─ train_autoformer.py # Autoformer 训练(仅 CSV)
 │  ├─ train_testmodel.py  # SimpleGRUForecast 定义(供 testmodel 预测用)
 │  └─ models/             # informer.py / autoformer.py
-└─ db/                    # data_reader.py(PG/SQLServer)、train_status.py(状态回写)
+└─ db/                    # data_reader.py、train_status.py、training_jobs.py(SQL 任务状态)
 configs/                  # model_registry.yaml + *_config.json(.example 入库)
 tests/                    # pytest 套件 + conftest 网络隔离 + fixtures + integration/
 ```
 
-**数据流**:原始数据(PG/SQLServer/CSV)→ `clean_and_resample_timeseries`(列名规范化→丢坏行→按 freq 桶均值聚合,**不插值**)→ 滑窗(seq_len+pred_len)→ 80/10/10 顺序切分 → 训练集 mean/std 归一化 → DataLoader → Informer/Autoformer(MSE+Adam+ReduceLROnPlateau+EarlyStopping,`set_seed(42)`)→ checkpoint(.pt+mean/std+args)+ loss_curve.png + forecast.png → 推理取最新 seq_len 点 → 反归一化 → (可选)残差注入 → JSON 响应。
+**API 训练流**:`POST /train`→冻结 TrainingPlan→SQL `QUEUED`→Redis/Celery→空闲 GPU Worker 条件更新为 `RUNNING`→现有训练管线→`SUCCEEDED/FAILED`。Celery 消息只包含 `job_id`;业务状态以 `dbo.training_jobs` 为准,checkpoint 仍由 ModelInfoID 文件锁保护。
+
+**模型数据流**:原始数据(PG/SQLServer/CSV)→ `clean_and_resample_timeseries`(列名规范化→丢坏行→按 freq 桶均值聚合,**不插值**)→ 滑窗(seq_len+pred_len)→ 80/10/10 顺序切分 → 训练集 mean/std 归一化 → DataLoader → Informer/Autoformer(MSE+Adam+ReduceLROnPlateau+EarlyStopping,`set_seed(42)`)→ checkpoint(.pt+mean/std+args)+ loss_curve.png + forecast.png → 推理取最新 seq_len 点 → 反归一化 → (可选)残差注入 → JSON 响应。
 
 ## 给 Agent 的注意事项(踩坑清单)
 
@@ -99,6 +106,7 @@ tests/                    # pytest 套件 + conftest 网络隔离 + fixtures + i
 9. **有完整测试套件**(旧文档“无测试”已失效):改 `data.py`/`config_resolution.py`/registry/onboard skill 后跑对应 `tests/test_*.py`;API 启动链由 `tests/test_api_startup.py` 守护;默认断网,真实库测试走 `integration_db` marker 并需授权环境变量。
 10. **API 端点已去 `/transformer` 段**:现为 `/measPredict/train` 等,别再用旧路径。
 11. **隔离 fixture 不训练**：用 `valeo-pdm prepare-isolated-fixtures --manifest configs/isolated_fixture_manifest.yaml --output .runtime/pdm-fixtures` 生成六个无换行 JSON 对象。启用 `VALEO_PDM_ISOLATED_FIXTURE_MODE=1` 时，必须提供非空 bearer token 和规范 UUID tenant allowlist；禁止生成 `.pt`、训练清单或 `artifacts/`。
+12. **异步训练 MVP 不含租约恢复**：部署前执行 `sql/001_create_training_jobs.sql`。API 与 Worker 共享 SQL Server 和 `artifacts/`;Worker/宿主机硬崩溃可能留下 `RUNNING`,当前不做自动回收。
 
 ## 新增模型类型 / 新增场景
 

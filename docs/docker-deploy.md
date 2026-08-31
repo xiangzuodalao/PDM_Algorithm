@@ -2,7 +2,9 @@
 
 本项目推荐以容器方式部署 FastAPI 服务，并通过挂载配置文件管理数据库连接与模型配置。
 
-默认 Docker 镜像使用仅 CPU 的 PyTorch，且不会请求 NVIDIA 设备。它保留训练与预测 API，但生产规模训练可能较慢。如需 GPU 镜像，必须使用独立的 Dockerfile/profile，并且只配置一个 CUDA/PyTorch 索引；不要向默认 lock 文件添加 CUDA 包。
+默认 Docker 镜像使用仅 CPU 的 PyTorch，且不会请求 NVIDIA 设备。预测 API 和同步
+CLI 训练保持可用；异步训练 API 还需要 SQL Server、Redis 以及宿主机 GPU Worker。
+不要向默认 lock 文件添加 CUDA 包。
 
 Dockerfile 的 Ubuntu 与 uv 外部镜像摘要已在 Linux/amd64 本地构建中验证。
 这些摘要不代表其他架构也已验证；在其他架构部署前应单独验证并更新。
@@ -51,6 +53,9 @@ docker compose down
 ## 4. 配置说明
 
 - `VALEO_PDM_POSTGRES_CONFIG`：数据库连接配置 JSON 的路径（建议挂载到容器内再指向它）
+- `VALEO_PDM_SQLSERVER_CONFIG`：异步任务表和平台训练状态连接配置
+- `VALEO_PDM_CELERY_BROKER_URL`：Redis broker；宿主机 Redis 可使用 `redis://host.docker.internal:6379/0`
+- `VALEO_PDM_CELERY_VISIBILITY_TIMEOUT`：默认 86400 秒，必须大于最长训练时间
 - `VALEO_PDM_MODEL_REGISTRY`：模型注册表 YAML 的路径（默认 `/app/configs/model_registry.yaml`）
 - `VALEO_PDM_HTTP_PORT`：对外暴露的 HTTP 端口（默认 10021），对应 `docker-compose.yml`
 

@@ -14,6 +14,9 @@ services:
     environment:
       # Mount your real DB config and point to it
       VALEO_PDM_POSTGRES_CONFIG: /app/configs/postgres_config.json
+      VALEO_PDM_SQLSERVER_CONFIG: /app/configs/sqlserver_config.json
+      VALEO_PDM_CELERY_BROKER_URL: "${VALEO_PDM_CELERY_BROKER_URL:-redis://host.docker.internal:6379/0}"
+      VALEO_PDM_CELERY_VISIBILITY_TIMEOUT: "${VALEO_PDM_CELERY_VISIBILITY_TIMEOUT:-86400}"
       # 兼容现有数字化平台；MCP 始终携带训练计划哈希
       VALEO_PDM_REQUIRE_TRAIN_PLAN_HASH: "${VALEO_PDM_REQUIRE_TRAIN_PLAN_HASH:-0}"
       # Optional: override model registry path

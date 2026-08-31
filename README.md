@@ -53,6 +53,42 @@ valeo-pdm train -e V-SZ-ISD-102 -m CCD-Score1
 valeo-pdm train --all
 ```
 
+### 异步 API 训练
+
+API 训练使用 SQL Server `training_jobs` 表记录状态，并通过 Redis + Celery 分发到
+GPU Worker。首次部署先执行迁移：
+
+```bash
+sqlcmd -S <server> -d <database> -i sql/001_create_training_jobs.sql
+```
+
+准备 Redis（也可以使用已有实例）：
+
+```bash
+docker run -d --name valeo-pdm-redis -p 127.0.0.1:6379:6379 \
+  redis:7.4-alpine redis-server --appendonly yes --maxmemory-policy noeviction
+```
+
+配置连接：
+
+```bash
+export VALEO_PDM_SQLSERVER_CONFIG="$PWD/configs/sqlserver_config.json"
+export VALEO_PDM_CELERY_BROKER_URL="redis://127.0.0.1:6379/0"
+export VALEO_PDM_CELERY_VISIBILITY_TIMEOUT=86400
+```
+
+在已经安装 CUDA 版 PyTorch 的独立 `.venv-gpu` 环境中启动三个 Worker。每个进程
+只看到一块物理 GPU，因此训练代码中的 `cuda:0` 会落到对应设备：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 UV_PROJECT_ENVIRONMENT=.venv-gpu uv run --no-sync celery -A valeo_pdm.training.celery_app:app worker -Q training -n gpu0@%h --concurrency=1 --prefetch-multiplier=1
+CUDA_VISIBLE_DEVICES=1 UV_PROJECT_ENVIRONMENT=.venv-gpu uv run --no-sync celery -A valeo_pdm.training.celery_app:app worker -Q training -n gpu1@%h --concurrency=1 --prefetch-multiplier=1
+CUDA_VISIBLE_DEVICES=2 UV_PROJECT_ENVIRONMENT=.venv-gpu uv run --no-sync celery -A valeo_pdm.training.celery_app:app worker -Q training -n gpu2@%h --concurrency=1 --prefetch-multiplier=1
+```
+
+三个 Worker 消费同一个 `training` 队列，最多并行三个训练任务。所有 Worker 与
+API 必须使用同一个 SQL Server，并共享同一个 `artifacts/` 目录。
+
 ## 启动 API
 
 ```bash
@@ -80,13 +116,15 @@ Linux/amd64 本地构建中验证，其他架构需要单独验证。
 
 - `configs/model_registry.yaml`：设备/参数 -> 模型配置与训练超参数
 - `configs/postgres_config.json`：数据库连接（不入库），参考 `configs/postgres_config.example.json`
-- `configs/sqlserver_config.json`：训练状态写回 SQL Server 的连接与列信息（不入库），参考 `configs/sqlserver_config.example.json`
+- `configs/sqlserver_config.json`：异步任务表及平台训练状态写回使用的 SQL Server 连接（不入库），参考 `configs/sqlserver_config.example.json`
 
 环境变量：
 
 - `VALEO_PDM_MODEL_REGISTRY`：指定 `model_registry.yaml` 路径
 - `VALEO_PDM_POSTGRES_CONFIG`：指定 PostgreSQL 配置 JSON 路径
 - `VALEO_PDM_SQLSERVER_CONFIG`：指定 SQL Server 状态更新配置 JSON 路径
+- `VALEO_PDM_CELERY_BROKER_URL`：Celery Redis broker，默认 `redis://127.0.0.1:6379/0`
+- `VALEO_PDM_CELERY_VISIBILITY_TIMEOUT`：Redis 未确认任务可见性超时秒数，默认 `86400`，必须大于最长训练时间
 - `VALEO_PDM_ROOT`：显式指定项目根目录（通常不需要）
 - `VALEO_PDM_REQUIRE_TRAIN_PLAN_HASH`：设为 `1` 时，训练必须携带预览返回的计划哈希；默认 `0` 以兼容既有平台调用
 - `VALEO_PDM_ISOLATED_FIXTURE_MODE`：设为 `1` 启用隔离试点 fixture；同时必须设置非空的 `VALEO_PDM_PREDICTION_V2_BEARER_TOKEN` 和逗号分隔的规范 UUID `VALEO_PDM_ALLOWED_TENANT_IDS`
@@ -106,8 +144,8 @@ Linux/amd64 本地构建中验证，其他架构需要单独验证。
 
 - 启动：`valeo-pdm serve --host 0.0.0.0 --port 8000`
 - 训练预览：`POST /measPredict/train/preview`，返回最终生效参数和 `plan_hash`，不读取训练数据、不启动训练；数据检查由 `/checkData` 或 MCP 的 `pdm_prepare_training` 编排完成。
-- 训练接口：`POST /measPredict/train`，必填 `EquipmentCode/MeasCode/ModelInfoID/ParamArr/DataSource`；API 训练仅支持 `informer`/`autoformer`。
-- 训练状态：`GET /measPredict/train/status`
+- 训练接口：`POST /measPredict/train`，必填 `EquipmentCode/MeasCode/ModelInfoID/ParamArr/DataSource`；写入 `QUEUED` 后返回 HTTP 202，API 训练仅支持 `informer`/`autoformer`。
+- 训练状态：`GET /measPredict/train/status`，状态为 `QUEUED/RUNNING/SUCCEEDED/FAILED`。
 - 预测接口：`POST /measPredict/predict`，可选 `ModelInfoID`（为空使用固定默认 checkpoint）、`ModelType`。
 - 模型列表：`GET /measPredict/models`
 - 数据检查：`POST /measPredict/checkData`
@@ -126,9 +164,10 @@ Linux/amd64 本地构建中验证，其他架构需要单独验证。
 - PostgreSQL（默认）：按 `configs/postgres_config.json` 里 SQL 查询拉取数据。
 - CSV：在 `configs/model_registry.yaml` 对应条目设置 `source: csv`、`data_path: data/<文件>`。API/MCP 只接受 `data/` 下的相对路径，并拒绝 `..`、绝对路径和解析后越界的符号链接；格式需包含 `value` 列，最好有 `collect_time/collecttime/timestamp`。
 
-### 训练状态回写（可选）
+### 平台训练状态回写（可选）
 
-- 需 `configs/sqlserver_config.json` 填好连接和列名，并在表中预置 `ModelInfoId`/`IsActive` 等条件匹配行。
+- API 异步训练始终使用同一配置中的 `conn_str` 访问 `dbo.training_jobs`；平台业务状态回写仍为可选能力。
+- 启用平台状态回写时，需填好连接和列名，并在业务表中预置 `ModelInfoId`/`IsActive` 等条件匹配行。
 - 状态码默认：1=Training，2=Failed，3=Completed；描述写入英文短语；附件列可写预测图路径。
 
 ## 如何新增场景（设备/参数组合）
@@ -187,7 +226,10 @@ Linux/amd64 本地构建中验证，其他架构需要单独验证。
 │  │  └─ router.py          # 训练/预测接口逻辑、参数解析
 │  ├─ training/             # 训练调度
 │  │  ├─ registry.py        # 模型类型 -> Trainer 映射
-│  │  └─ from_config.py     # 读取配置并调用 Trainer，保存参数
+│  │  ├─ celery_app.py      # Redis broker 与 Celery 配置
+│  │  ├─ tasks.py           # 异步训练任务
+│  │  ├─ execution.py       # 共享训练执行服务
+│  │  └─ from_config.py     # CLI 配置训练入口
 │  ├─ transformer/          # 模型、训练、预测实现
 │  │  ├─ train_informer.py  # informer 训练
 │  │  ├─ train_autoformer.py# autoformer 训练（仅 CSV）
@@ -197,7 +239,8 @@ Linux/amd64 本地构建中验证，其他架构需要单独验证。
 │  │  └─ data.py            # 数据预处理、窗口切分工具
 │  ├─ db/                   # 数据源 & 状态回写
 │  │  ├─ data_reader.py     # PostgreSQL/SQL Server 数据读取
-│  │  └─ train_status.py    # SQL Server 训练状态回写
+│  │  ├─ train_status.py    # SQL Server 平台状态回写
+│  │  └─ training_jobs.py   # SQL Server 异步任务状态
 │  └─ paths.py              # 路径辅助
 └─ docker-compose.yml, Dockerfile # 容器部署
 ```
@@ -217,6 +260,17 @@ Linux/amd64 本地构建中验证，其他架构需要单独验证。
     "ParamArr": [{ "FieldName": "epochs", "CurValue": 3 }],
     "DataSource": "postgres",
     "ExecutionMode": "platform"
+  }
+  ```
+- 成功提交返回 HTTP 202：
+  ```json
+  {
+    "success": true,
+    "msg": "训练任务已进入队列",
+    "job_id": "4ed5c33b-8ac7-487f-a667-76066999d90f",
+    "model_info_id": "Run_001",
+    "plan_hash": "...",
+    "status": "QUEUED"
   }
   ```
 - API 预测 JSON 示例：
