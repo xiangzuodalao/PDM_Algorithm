@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Dict
 import threading
+from typing import Any
+
 import numpy as np
 import pandas as pd
 import torch
@@ -89,14 +90,15 @@ def _freq_desc(freq: str) -> str:
     return f
 
 
-def build_api_response_informer(
+def _build_api_response(
     equipment_code: str,
     meas_code: str,
+    model_type: str,
     freq: str,
     future_times,
     future_values,
     original_history_data: pd.DataFrame,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     values = [
         {
             "Seq": i + 1,
@@ -106,48 +108,13 @@ def build_api_response_informer(
         }
         for i in range(len(future_values))
     ]
-    remark = f"设备: {equipment_code}, 模型: informer, 预测粒度: {_freq_desc(freq)}"
+    remark = f"设备: {equipment_code}, 模型: {model_type}, 预测粒度: {_freq_desc(freq)}"
     return {
         "success": True,
         "msg": f"设备[{equipment_code}]参数[{meas_code}]预测成功",
         "response": {
-            # "MinDataId": None,
-            # "MaxDataId": None,
             "SampleCount": int(len(original_history_data)),
             "Remark": remark,
-            # "SkippedValues": [],
-            "Values": values,
-        },
-    }
-
-
-def build_api_response_autoformer(
-    equipment_code: str,
-    meas_code: str,
-    freq: str,
-    future_times,
-    future_values,
-    original_history_data: pd.DataFrame,
-) -> Dict[str, Any]:
-    values = [
-        {
-            "Seq": i + 1,
-            "XAxis": pd.Timestamp(future_times[i]).strftime("%Y-%m-%d %H:%M:%S"),
-            "Value": f"{float(future_values[i]):.9f}",
-            "Unit": "",
-        }
-        for i in range(len(future_values))
-    ]
-    remark = f"设备: {equipment_code}, 模型: autoformer, 预测粒度: {_freq_desc(freq)}"
-    return {
-        "success": True,
-        "msg": f"设备[{equipment_code}]参数[{meas_code}]预测成功",
-        "response": {
-            # "MinDataId": None,
-            # "MaxDataId": None,
-            "SampleCount": int(len(original_history_data)),
-            "Remark": remark,
-            # "SkippedValues": [],
             "Values": values,
         },
     }
@@ -190,6 +157,62 @@ def _load_prediction_rows(
     raise ValueError(f"不支持的预测数据源: {normalized_source}")
 
 
+def _prepare_prediction_data(
+    *,
+    source: str,
+    data_path: str,
+    config_path: str,
+    equipment_code: str,
+    meas_code: str,
+    days_back: int,
+    freq: str,
+) -> tuple[pd.DataFrame, pd.DataFrame, np.ndarray]:
+    rows = _load_prediction_rows(
+        source=source,
+        data_path=data_path,
+        config_path=config_path,
+        equipment_code=equipment_code,
+        meas_code=meas_code,
+        days_back=days_back,
+    )
+    series, _quality = clean_and_resample_timeseries(
+        rows,
+        freq=freq,
+        equipment_code=equipment_code,
+        meas_code=meas_code,
+    )
+    values = series["value"].to_numpy(dtype=np.float32)
+    return rows, series, values
+
+
+def _predict_latest(
+    model: torch.nn.Module,
+    values: np.ndarray,
+    seq_len: int,
+    mean: float,
+    std: float,
+    device: torch.device,
+) -> np.ndarray:
+    latest = values[-seq_len:]
+    normalized = (latest - mean) / std
+    tensor = torch.from_numpy(np.asarray(normalized)[None, :, None]).to(device)
+    with torch.no_grad():
+        prediction = model(tensor)
+    return prediction[0].detach().cpu().numpy() * std + mean
+
+
+def _make_future_times(latest_ts: object, freq: str, pred_len: int) -> list[pd.Timestamp]:
+    try:
+        if str(freq).lower().endswith("min"):
+            minutes = int(str(freq).lower()[:-3])
+            start = pd.Timestamp(latest_ts) + pd.Timedelta(minutes=minutes)
+        else:
+            start = pd.date_range(start=pd.Timestamp(latest_ts), periods=2, freq=freq)[1]
+        return list(pd.date_range(start=start, periods=pred_len, freq=freq))
+    except Exception:
+        return [pd.Timestamp(latest_ts)] * pred_len
+
+
 def predict_informer_api(
     equipment_code: str,
     meas_code: str,
@@ -207,34 +230,20 @@ def predict_informer_api(
     # 获取缓存的模型
     model, m, s, sl, pl = _get_cached_informer(ckpt_path, device)
 
-    # 获取数据
-    df = _load_prediction_rows(
+    df, sd, vals = _prepare_prediction_data(
         source=source,
         data_path=data_path,
         config_path=config_path,
         equipment_code=equipment_code,
         meas_code=meas_code,
         days_back=days_back,
+        freq=freq,
     )
-    sd, _quality = clean_and_resample_timeseries(
-        df,
-        freq,
-        equipment_code=equipment_code,
-        meas_code=meas_code,
-    )
-    vals = sd["value"].to_numpy(dtype=np.float32)
 
     if len(vals) < sl:
-        return build_api_response_informer(equipment_code, meas_code, freq, [], [], df)
+        return _build_api_response(equipment_code, meas_code, "informer", freq, [], [], df)
 
-    # 预测主序列
-    x = vals[-sl:]
-    x_norm = (x - m) / s
-    x_t = torch.from_numpy(np.asarray(x_norm)[None, :, None]).to(device)
-
-    with torch.no_grad():
-        y_hat = model(x_t)
-    y_pred_den = y_hat[0].detach().cpu().numpy() * s + m
+    y_pred_den = _predict_latest(model, vals, sl, m, s, device)
 
     # ==========================================
     # 【残差批量并行计算】代替 for 循环中的单步推理
@@ -262,9 +271,7 @@ def predict_informer_api(
             batch_x_t = torch.from_numpy(batch_inputs_norm[..., None]).to(device)
 
             # 3. 分块推理 (Mini-Batch)，防止 CPU/GPU 瞬间打满和内存溢出
-            chunk_size = (
-                64  # 【关键参数】如果 CPU 还是吃紧，可以调小到 32；如果性能有余，可以调大到 128
-            )
+            chunk_size = 64
             all_first_step_preds = []
 
             with torch.no_grad():
@@ -291,21 +298,14 @@ def predict_informer_api(
                     clean_res, pl, residual_strength
                 )
 
-    # 组装未来时间
-    latest_ts = sd.index.max()
-    try:
-        if str(freq).lower().endswith("min"):
-            minutes = int(str(freq).lower()[:-3])
-            start = pd.Timestamp(latest_ts) + pd.Timedelta(minutes=minutes)
-        else:
-            start = pd.Timestamp(latest_ts)
-            start = pd.date_range(start=start, periods=2, freq=freq)[1]
-        future_times = pd.date_range(start=start, periods=pl, freq=freq)
-    except Exception:
-        future_times = [pd.Timestamp(latest_ts)] * pl
-
-    return build_api_response_informer(
-        equipment_code, meas_code, freq, list(future_times), list(y_pred_den), df
+    return _build_api_response(
+        equipment_code,
+        meas_code,
+        "informer",
+        freq,
+        _make_future_times(sd.index.max(), freq, pl),
+        list(y_pred_den),
+        df,
     )
 
 
@@ -342,43 +342,27 @@ def predict_testmodel_api(
     model.load_state_dict(c["model"])
     model.eval()
 
-    df = _load_prediction_rows(
+    df, sd, vals = _prepare_prediction_data(
         source=source,
         data_path=data_path,
         config_path=config_path,
         equipment_code=equipment_code,
         meas_code=meas_code,
         days_back=days_back,
+        freq=freq,
     )
-    sd, _quality = clean_and_resample_timeseries(
-        df,
-        freq,
-        equipment_code=equipment_code,
-        meas_code=meas_code,
-    )
-    vals = sd["value"].to_numpy(dtype=np.float32)
     if len(vals) < sl:
-        return build_api_response_informer(equipment_code, meas_code, freq, [], [], df)
-    x = vals[-sl:]
-    x_norm = (x - m) / s
-    x_t = torch.from_numpy(np.asarray(x_norm)[None, :, None]).to(device)
-    with torch.no_grad():
-        y_hat = model(x_t)
-    y_pred_den = y_hat[0].detach().cpu().numpy() * s + m
+        return _build_api_response(equipment_code, meas_code, "testmodel", freq, [], [], df)
 
-    latest_ts = sd.index.max()
-    try:
-        if str(freq).lower().endswith("min"):
-            minutes = int(str(freq).lower()[:-3])
-            start = pd.Timestamp(latest_ts) + pd.Timedelta(minutes=minutes)
-        else:
-            start = pd.Timestamp(latest_ts)
-            start = pd.date_range(start=start, periods=2, freq=freq)[1]
-        future_times = pd.date_range(start=start, periods=pl, freq=freq)
-    except Exception:
-        future_times = [pd.Timestamp(latest_ts)] * pl
-    return build_api_response_informer(
-        equipment_code, meas_code, freq, list(future_times), list(y_pred_den), df
+    y_pred_den = _predict_latest(model, vals, sl, m, s, device)
+    return _build_api_response(
+        equipment_code,
+        meas_code,
+        "testmodel",
+        freq,
+        _make_future_times(sd.index.max(), freq, pl),
+        list(y_pred_den),
+        df,
     )
 
 
@@ -418,30 +402,19 @@ def predict_autoformer_api(
 
     if str(source).strip().lower() != "csv":
         raise ValueError("Autoformer 仅支持 CSV 数据源")
-    df = _load_prediction_rows(
+    df, sd, vals = _prepare_prediction_data(
         source=source,
         data_path=data_path,
         config_path=config_path,
         equipment_code=equipment_code,
         meas_code=meas_code,
         days_back=days_back,
+        freq=freq,
     )
-    sd, _quality = clean_and_resample_timeseries(
-        df,
-        freq,
-        equipment_code=equipment_code,
-        meas_code=meas_code,
-    )
-    vals = sd["value"].to_numpy(dtype=np.float32)
     if len(vals) < sl:
-        return build_api_response_autoformer(equipment_code, meas_code, freq, [], [], df)
-    x = vals[-sl:]
-    x_norm = (x - m) / s
-    x_t = torch.from_numpy(np.asarray(x_norm)[None, :, None]).to(device)
+        return _build_api_response(equipment_code, meas_code, "autoformer", freq, [], [], df)
 
-    with torch.no_grad():
-        y_hat = model(x_t)
-    y_pred_den = y_hat[0].detach().cpu().numpy() * s + m
+    y_pred_den = _predict_latest(model, vals, sl, m, s, device)
 
     if add_residual and len(vals) > sl:
         hist_len = min(len(vals) - sl, sl * 2)
@@ -463,17 +436,12 @@ def predict_autoformer_api(
             clean_res = _clean_residuals(np.array(raw_residuals))
             y_pred_den = y_pred_den + _generate_future_residuals(clean_res, pl, residual_strength)
 
-    latest_ts = sd.index.max()
-    try:
-        if str(freq).lower().endswith("min"):
-            minutes = int(str(freq).lower()[:-3])
-            start = pd.Timestamp(latest_ts) + pd.Timedelta(minutes=minutes)
-        else:
-            start = pd.Timestamp(latest_ts)
-            start = pd.date_range(start=start, periods=2, freq=freq)[1]
-        future_times = pd.date_range(start=start, periods=pl, freq=freq)
-    except Exception:
-        future_times = [pd.Timestamp(latest_ts)] * pl
-    return build_api_response_autoformer(
-        equipment_code, meas_code, freq, list(future_times), list(y_pred_den), df
+    return _build_api_response(
+        equipment_code,
+        meas_code,
+        "autoformer",
+        freq,
+        _make_future_times(sd.index.max(), freq, pl),
+        list(y_pred_den),
+        df,
     )
