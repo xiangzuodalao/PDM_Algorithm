@@ -20,7 +20,7 @@ from valeo_pdm.training.run_control import (
     training_run_lock,
     update_manifest,
 )
-from valeo_pdm.transformer.artifacts import training_output_dir
+from valeo_pdm.transformer.artifacts import resolve_checkpoint_path, training_output_dir
 
 
 BASE_CONFIG: dict[str, Any] = {
@@ -386,6 +386,53 @@ def test_predict_rejects_model_info_id_path_traversal(isolated_api) -> None:
     )
     assert response.status_code == 400
     assert "ModelInfoID" in response.json()["detail"]
+
+
+@pytest.mark.parametrize("model_info_id", [None, "prediction-run-1"])
+def test_predict_dispatches_resolved_checkpoint(
+    isolated_api,
+    monkeypatch: pytest.MonkeyPatch,
+    model_info_id: str | None,
+) -> None:
+    client, _config, root = isolated_api
+    if model_info_id is None:
+        checkpoint = resolve_checkpoint_path("EQ-1", "MEAS-1", "informer")
+    else:
+        checkpoint = (
+            training_output_dir("EQ-1", "MEAS-1", "informer")
+            / model_info_id
+            / "informer_best.pt"
+        )
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint.write_bytes(b"checkpoint")
+    captured: dict[str, Any] = {}
+
+    def predictor(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return {
+            "success": True,
+            "msg": "预测成功",
+            "response": {"SampleCount": 1, "Remark": "informer", "Values": []},
+        }
+
+    monkeypatch.setitem(api_router.MODEL_PREDICT_FUNCS, "informer", predictor)
+    payload: dict[str, Any] = {"EquipmentCode": "EQ-1", "MeasCode": "MEAS-1"}
+    if model_info_id is not None:
+        payload["ModelInfoID"] = model_info_id
+
+    response = client.post("/measPredict/predict", json=payload)
+
+    assert response.status_code == 200
+    assert captured["args"] == (
+        "EQ-1",
+        "MEAS-1",
+        "15min",
+        30,
+        str(checkpoint),
+        str(root / "configs" / "postgres_config.json"),
+    )
+    assert captured["kwargs"] == {"source": "db", "data_path": ""}
 
 
 def test_platform_mode_keeps_status_and_forecast_upload_behavior(

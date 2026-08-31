@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import hmac
 import os
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
@@ -82,6 +84,20 @@ MODEL_PREDICT_FUNCS = {
 }
 # 场景 onboarding 工具通过 AST 读取该常量，必须保留为本文件中的字面量赋值。
 API_TRAIN_MODEL_TYPES = frozenset({"informer", "autoformer"})
+
+
+@dataclass(frozen=True)
+class PredictionPlan:
+    equipment_code: str
+    meas_code: str
+    model_type: str
+    freq: str
+    days_back: int
+    source: str
+    data_path: str
+    config_path: str
+    checkpoint_path: Path
+    predict_func: Callable[..., dict[str, Any]]
 
 
 class DynamicParams(BaseModel):
@@ -214,6 +230,112 @@ def _sqlserver_config_path() -> str:
 
 def _resolve_csv_path(path_str: str) -> str:
     return str(resolve_data_path(path_str))
+
+
+def _resolve_prediction_plan(request: PredictionRequest) -> PredictionPlan:
+    model_info_id = (
+        request.ModelInfoID
+        if request.ModelInfoID is not None and request.ModelInfoID.strip()
+        else None
+    )
+    requested_model_type = (
+        request.ModelType if request.ModelType is not None and request.ModelType.strip() else None
+    )
+
+    config = get_model_config(request.EquipmentCode, request.MeasCode)
+    if not config:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"未找到设备[{request.EquipmentCode}]"
+                f"参数[{request.MeasCode}]的模型配置"
+            ),
+        )
+
+    model_type = str(requested_model_type or config.get("model_type", "informer")).lower()
+    freq = str(config.get("freq", "15min"))
+    days_back = int(config.get("days_back", 365))
+    source = str(config.get("source", "db")).strip().lower()
+    data_path = str(config.get("data_path", ""))
+
+    if source == "sqlserver":
+        config_path = _sqlserver_config_path()
+    elif source in {"db", "postgres"}:
+        config_path = _postgres_config_path()
+    elif source == "csv":
+        config_path = ""
+        try:
+            data_path = _resolve_csv_path(data_path)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="UNSAFE_DATA_PATH") from exc
+    else:
+        raise HTTPException(status_code=400, detail=f"不支持的数据源: {source}")
+
+    predict_func = MODEL_PREDICT_FUNCS.get(model_type)
+    if predict_func is None:
+        raise HTTPException(status_code=400, detail=f"不支持的模型类型: {model_type}")
+    if model_type == "autoformer" and source != "csv":
+        raise HTTPException(status_code=400, detail="Autoformer 仅支持 CSV 数据源")
+
+    if model_info_id:
+        try:
+            validate_model_info_id(model_info_id)
+            identity = TrainingPlan(
+                equipment_code=request.EquipmentCode,
+                meas_code=request.MeasCode,
+                model_info_id=model_info_id,
+                model_type=model_type,
+                source=source,
+                freq=freq,
+                days_back=days_back,
+                data_path=data_path,
+                train_params={},
+                execution_mode="local_only",
+            )
+            checkpoint_path = resolve_safe_run_dir(identity) / checkpoint_filename(model_type)
+        except TrainingPlanError as exc:
+            raise _http_plan_error(exc) from exc
+        if not checkpoint_path.exists():
+            raise HTTPException(
+                status_code=404,
+                detail="MODEL_FILE_NOT_FOUND",
+            )
+    else:
+        checkpoint_path = resolve_checkpoint_path(
+            request.EquipmentCode, request.MeasCode, model_type
+        )
+        if not checkpoint_path.exists():
+            raise HTTPException(
+                status_code=404,
+                detail="MODEL_FILE_NOT_FOUND",
+            )
+
+    return PredictionPlan(
+        equipment_code=request.EquipmentCode,
+        meas_code=request.MeasCode,
+        model_type=model_type,
+        freq=freq,
+        days_back=days_back,
+        source=source,
+        data_path=data_path,
+        config_path=config_path,
+        checkpoint_path=checkpoint_path,
+        predict_func=predict_func,
+    )
+
+
+def _execute_prediction(request: PredictionRequest) -> dict[str, Any]:
+    plan = _resolve_prediction_plan(request)
+    return plan.predict_func(
+        plan.equipment_code,
+        plan.meas_code,
+        plan.freq,
+        plan.days_back,
+        str(plan.checkpoint_path),
+        plan.config_path,
+        source=plan.source,
+        data_path=plan.data_path,
+    )
 
 
 def _request_plan(request: TrainRequest) -> TrainingPlan:
@@ -507,86 +629,8 @@ def _execute_train_model(request: TrainRequest) -> TrainResponse:
 
 @router.post("/predict", response_model=APIResponse)
 async def predict_transformer(request: PredictionRequest):
-    if request.ModelInfoID is not None and not request.ModelInfoID.strip():
-        request.ModelInfoID = None
-    if request.ModelType is not None and not request.ModelType.strip():
-        request.ModelType = None
     try:
-        config = get_model_config(request.EquipmentCode, request.MeasCode)
-        if not config:
-            raise HTTPException(
-                status_code=404,
-                detail=f"未找到设备[{request.EquipmentCode}]参数[{request.MeasCode}]的模型配置",
-            )
-
-        req_model_type = request.ModelType or config.get("model_type", "informer")
-        model_type = str(req_model_type).lower()
-        freq = config.get("freq", "15min")
-        days_back = int(config.get("days_back", 365))
-        source = str(config.get("source", "db")).strip().lower()
-        data_path = str(config.get("data_path", ""))
-
-        if source == "sqlserver":
-            cfg = _sqlserver_config_path()
-        elif source in {"db", "postgres"}:
-            cfg = _postgres_config_path()
-        elif source == "csv":
-            cfg = ""
-            try:
-                data_path = _resolve_csv_path(data_path)
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail="UNSAFE_DATA_PATH") from exc
-        else:
-            raise HTTPException(status_code=400, detail=f"不支持的数据源: {source}")
-
-        predict_func = MODEL_PREDICT_FUNCS.get(model_type)
-        if not predict_func:
-            raise HTTPException(status_code=400, detail=f"不支持的模型类型: {model_type}")
-        if model_type == "autoformer" and source != "csv":
-            raise HTTPException(status_code=400, detail="Autoformer 仅支持 CSV 数据源")
-
-        if request.ModelInfoID:
-            try:
-                validate_model_info_id(request.ModelInfoID)
-                identity = TrainingPlan(
-                    equipment_code=request.EquipmentCode,
-                    meas_code=request.MeasCode,
-                    model_info_id=request.ModelInfoID,
-                    model_type=model_type,
-                    source=source,
-                    freq=freq,
-                    days_back=days_back,
-                    data_path=data_path,
-                    train_params={},
-                    execution_mode="local_only",
-                )
-                run_dir = resolve_safe_run_dir(identity)
-            except TrainingPlanError as exc:
-                raise _http_plan_error(exc) from exc
-            ckpt_path = run_dir / checkpoint_filename(model_type)
-            if not ckpt_path.exists():
-                raise HTTPException(
-                    status_code=404,
-                    detail="MODEL_FILE_NOT_FOUND",
-                )
-        else:
-            ckpt_path = resolve_checkpoint_path(request.EquipmentCode, request.MeasCode, model_type)
-            if not ckpt_path.exists():
-                raise HTTPException(
-                    status_code=404,
-                    detail="MODEL_FILE_NOT_FOUND",
-                )
-        resp = await asyncio.to_thread(
-            predict_func,
-            request.EquipmentCode,
-            request.MeasCode,
-            freq,
-            days_back,
-            str(ckpt_path),
-            cfg,
-            source=source,
-            data_path=data_path,
-        )
+        resp = await asyncio.to_thread(_execute_prediction, request)
         return APIResponse(**resp)
     except HTTPException:
         raise
